@@ -47,7 +47,7 @@ M5Stamp S3・コネクタ・ヘッダ類は国内の[スイッチサイエンス
 | チップ抵抗 10kΩ 0603 | R1 | 1 | LCSC C25804 | [秋月(チップ抵抗)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=10k+1608) |
 | チップ抵抗 20kΩ 0603 | R2 | 1 | LCSC C4184 | [秋月(チップ抵抗)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=20k+1608) |
 | ポリヒューズ 500mA | F1 | 1 | mSMD050 相当 | [秋月(ポリスイッチ)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=%E3%83%9D%E3%83%AA%E3%82%B9%E3%82%A4%E3%83%83%E3%83%81) |
-| 1.27mmメスピンヘッダ | — | 2 | 左17ピン+右11ピン(Stampソケット用) | [スイッチサイエンス](https://www.switch-science.com/search?q=1.27mm+%E3%83%98%E3%83%83%E3%83%80) / [秋月](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=1.27mm) |
+| M5StampS3用 1.27mm SMDピンソケット | — | 各1 | 17P + 11P(Stampソケット用・専用品) | [スイッチサイエンス(11P/17P各10個)](https://www.switch-science.com/products/9197) |
 | M3ネジ・スペーサ | MH1–4 | 各4 | 3Dプリンタ筐体固定用 | [秋月(M3)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=M3+%E3%82%B9%E3%83%9A%E3%83%BC%E3%82%B5) |
 
 > リンクは検索結果ページです(在庫・品番は変動するため)。完全なSMD部品表は [`hardware/nes-rom-reader-BOM.csv`](hardware/nes-rom-reader-BOM.csv) を参照。
