@@ -39,7 +39,7 @@ M5Stamp S3・コネクタ・ヘッダ類は国内の[スイッチサイエンス
 |---|---|---|---|---|
 | M5Stamp S3 | U1 | 1 | ESP32-S3 モジュール(M5StampS3A) | [スイッチサイエンス](https://www.switch-science.com/products/10377) / [秋月](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=M5Stamp) |
 | FC 60ピンスロットコネクタ | J1 | 1 | 2.54mmピッチ・ファミコン用 | [スイッチサイエンス検索](https://www.switch-science.com/search?q=%E3%82%AB%E3%83%BC%E3%83%89%E3%82%A8%E3%83%83%E3%82%B8) ※互換品(Amazon/AliExpress等)も可 |
-| 74HCT595(SOIC-16) | U2–U5 | 4 | シフトレジスタ / LCSC C70468 | [秋月(74HC595)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=74HC595) |
+| 74HC595 / 74HCT595(SOP/SOIC-16) | U2–U5 | 4 | シフトレジスタ / LCSC C70468 ※541経由で5V化されるためHC/HCTどちらも可 | [秋月 TC74HC595AF](https://akizukidenshi.com/catalog/g/g110077/) |
 | 74LVC245(SOIC-20) | U6, U7 | 2 | バスバッファ / LCSC C571201 | [秋月(74LVC245)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=74LVC245) |
 | 74HCT541(SOIC-20) | U8 | 1 | バスバッファ / LCSC C1548616 | [秋月(74HC541)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=74HC541) |
 | 積層セラコン 100nF 0603 | C1–C8 | 8 | パスコン / LCSC C1591 | [秋月(チップコンデンサ)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=0.1uF+1608) |
