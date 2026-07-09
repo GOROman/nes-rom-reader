@@ -45,6 +45,15 @@ python host/famidump.py --port /dev/tty.usbmodem* --prg 32 --chr 8 -o game.nes
 - 設計方針・ピンマップ・60ピン配列: [docs/hardware-design.md](docs/hardware-design.md)
 - 基板データ詳細: [hardware/README.md](hardware/README.md)
 
+## クレジット
+
+このプロジェクトは **[Claude Code](https://claude.com/claude-code)(Fable 5)** によって、
+ファームウェア開発と **EasyEDA Pro** での基板設計(回路図・PCB・配線・製造データ生成)が行われました。
+
+Claude Code と EasyEDA Pro の連携には、WebSocketブリッジ拡張機能
+**[eext-run-api-gateway](https://github.com/easyeda/eext-run-api-gateway)** を使用しています。
+これにより、AIが EasyEDA Pro を直接操作して基板を設計できます。
+
 ---
 
-Powered by Claude Code (Fable 5)
+Powered by Claude Code (Fable 5) × EasyEDA Pro
