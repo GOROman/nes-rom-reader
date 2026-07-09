@@ -1,0 +1,8 @@
+.DS_Store
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+# Python
+host/__pycache__/
+host/*.pyc
+host/.venv/

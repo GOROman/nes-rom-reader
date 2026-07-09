@@ -1,0 +1,187 @@
+// nes-rom-reader firmware (M5Stamp S3)
+//
+// ホストとはUSB CDCで通信。プロトコル(1行コマンド、応答はバイナリ):
+//   V                      -> "famidump v0.2\n"
+//   R <addr_hex> <len_hex> -> PRG読み出し。"OK <len>\n" + 生データ + "CRC xxxxxxxx\n"
+//   C <addr_hex> <len_hex> -> CHR読み出し。同上
+//   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
+//
+// データブロック直後の "CRC xxxxxxxx\n" は生データの CRC32
+// (IEEE 802.3 / zlib.crc32 互換、8桁大文字hex)。ホスト側で照合する。
+
+#include <Arduino.h>
+
+// --- ピンアサイン (docs/hardware-design.md と一致させること) ---
+// 制御線は全て 74HCT541 バッファ経由で 5V 化してカートリッジへ。
+static const int PIN_D[8]    = {4, 5, 6, 7, 8, 9, 10, 11};  // MD0-MD7 (LVC245 A側共通バス)
+static const int PIN_SR_DATA  = 12;  // SR_DATA  -> 541 -> U2.SER
+static const int PIN_SR_CLK   = 13;  // SR_CLK   -> 541 -> 595 SRCLK (4個共通)
+static const int PIN_SR_LATCH = 14;  // SR_LATCH -> 541 -> 595 RCLK (4個共通)
+static const int PIN_OE_PRG   = 15;  // OE_PRG_N: U6 (LVC245, CPUデータ) /OE 負論理
+static const int PIN_OE_CHR   = 39;  // OE_CHR_N: U7 (LVC245, PPUデータ) /OE 負論理
+static const int PIN_ROMSEL   = 41;  // /ROMSEL 負論理
+static const int PIN_M2       = 42;
+static const int PIN_RW       = 1;   // CPU R/W High=Read
+static const int PIN_PPU_RD   = 2;   // PPU /RD 負論理
+static const int PIN_PPU_WR   = 3;   // PPU /WR 負論理
+static const int PIN_CIRAM_A10 = 46; // 入力 (10k/20k分圧で5V→3.3V)
+
+// --- シフトレジスタ 32bit ビット割り当て (U2→U3→U4→U5 直列) ---
+// srWrite32() は bit31 から MSBファーストで送出するため、32クロック後に
+// bit0 が U2.QA、bit31 が U5.QH に格納される。
+//
+//   bit0-7   : U2 QA-QH = CPU A0-A7  (CA0-CA7)
+//   bit8-14  : U3 QA-QG = CPU A8-A14 (CA8-CA14)
+//   bit15    : U3 QH    = 予備
+//   bit16-23 : U4 QA-QH = PPU A0-A7  (PA0-PA7)
+//   bit24-29 : U5 QA-QF = PPU A8-A13 (PA8-PA13)
+//   bit30    : U5 QG    = PPU /A13   (カートピン49) ※PPU A13 の反転を必ず駆動
+//   bit31    : U5 QH    = 予備
+static const uint32_t SR_PPU_A13_N = 1UL << 30;
+
+// 通常の PRG/CHR 読み出しでは PPU A13=0 なので bit30 (PPU /A13) は常に 1。
+static inline uint32_t srCpuAddr(uint16_t addr) {
+  return ((uint32_t)(addr & 0x7FFF)) | SR_PPU_A13_N;
+}
+static inline uint32_t srPpuAddr(uint16_t addr) {
+  uint32_t v = ((uint32_t)(addr & 0x3FFF)) << 16;
+  if (!(addr & 0x2000)) v |= SR_PPU_A13_N;  // bit30 = NOT(PPU A13)
+  return v;
+}
+
+static void srWrite32(uint32_t v) {
+  for (int i = 31; i >= 0; i--) {  // MSBファースト (bit31が最初)
+    digitalWrite(PIN_SR_DATA, (v >> i) & 1);
+    digitalWrite(PIN_SR_CLK, HIGH);
+    digitalWrite(PIN_SR_CLK, LOW);
+  }
+  digitalWrite(PIN_SR_LATCH, HIGH);
+  digitalWrite(PIN_SR_LATCH, LOW);
+}
+
+static uint8_t readDataBus() {
+  uint32_t in = REG_READ(GPIO_IN_REG);  // MD0-MD7は全てGPIO<32
+  uint8_t v = 0;
+  for (int i = 0; i < 8; i++) v |= ((in >> PIN_D[i]) & 1) << i;
+  return v;
+}
+
+// CRC32 (IEEE 802.3, zlib互換)。テーブルレスのニブル実装。
+static uint32_t crc32Update(uint32_t crc, const uint8_t *p, size_t n) {
+  static const uint32_t tbl[16] = {
+    0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC,
+    0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C,
+    0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C,
+    0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C,
+  };
+  while (n--) {
+    crc ^= *p++;
+    crc = (crc >> 4) ^ tbl[crc & 0x0F];
+    crc = (crc >> 4) ^ tbl[crc & 0x0F];
+  }
+  return crc;
+}
+
+// PRG空間読み出し。addrはCPUアドレス($8000-$FFFF想定、A0-A14のみ使用)
+static uint8_t readPrg(uint16_t addr) {
+  srWrite32(srCpuAddr(addr));
+  digitalWrite(PIN_ROMSEL, LOW);
+  digitalWrite(PIN_OE_PRG, LOW);
+  delayMicroseconds(1);  // ROMアクセスタイム待ち(要調整)
+  uint8_t v = readDataBus();
+  digitalWrite(PIN_OE_PRG, HIGH);
+  digitalWrite(PIN_ROMSEL, HIGH);
+  return v;
+}
+
+// CHR空間読み出し。addrはPPUアドレス($0000-$1FFF、PPU A13=0 → bit30=1)
+static uint8_t readChr(uint16_t addr) {
+  srWrite32(srPpuAddr(addr & 0x1FFF));
+  digitalWrite(PIN_PPU_RD, LOW);
+  digitalWrite(PIN_OE_CHR, LOW);
+  delayMicroseconds(1);
+  uint8_t v = readDataBus();
+  digitalWrite(PIN_OE_CHR, HIGH);
+  digitalWrite(PIN_PPU_RD, HIGH);
+  return v;
+}
+
+// ミラーリング判定: PPU A11をトグルしてCIRAM A10が追従すればH、
+// PPU A10追従ならV
+static char detectMirroring() {
+  srWrite32(srPpuAddr(0x0800));  // PPU A11=1 (PPU A13=0, bit30=1)
+  delayMicroseconds(1);
+  bool a11 = digitalRead(PIN_CIRAM_A10);
+  srWrite32(srPpuAddr(0x0400));  // PPU A10=1
+  delayMicroseconds(1);
+  bool a10 = digitalRead(PIN_CIRAM_A10);
+  if (a11 && !a10) return 'H';
+  if (a10 && !a11) return 'V';
+  return '?';  // 4画面 or 未接続
+}
+
+static void busIdle() {
+  digitalWrite(PIN_OE_PRG, HIGH);
+  digitalWrite(PIN_OE_CHR, HIGH);
+  digitalWrite(PIN_ROMSEL, HIGH);
+  digitalWrite(PIN_M2, HIGH);
+  digitalWrite(PIN_RW, HIGH);
+  digitalWrite(PIN_PPU_RD, HIGH);
+  digitalWrite(PIN_PPU_WR, HIGH);
+}
+
+void setup() {
+  for (int i = 0; i < 8; i++) pinMode(PIN_D[i], INPUT);
+  pinMode(PIN_SR_DATA, OUTPUT);
+  pinMode(PIN_SR_CLK, OUTPUT);
+  pinMode(PIN_SR_LATCH, OUTPUT);
+  pinMode(PIN_OE_PRG, OUTPUT);
+  pinMode(PIN_OE_CHR, OUTPUT);
+  pinMode(PIN_ROMSEL, OUTPUT);
+  pinMode(PIN_M2, OUTPUT);
+  pinMode(PIN_RW, OUTPUT);
+  pinMode(PIN_PPU_RD, OUTPUT);
+  pinMode(PIN_PPU_WR, OUTPUT);
+  pinMode(PIN_CIRAM_A10, INPUT);
+  busIdle();
+  srWrite32(SR_PPU_A13_N);  // アイドル時も PPU /A13=1 (PPU A13=0)
+  Serial.begin(115200);
+}
+
+static void handleRead(bool chr, uint32_t addr, uint32_t len) {
+  Serial.printf("OK %lX\n", (unsigned long)len);
+  uint8_t buf[256];
+  uint32_t crc = 0xFFFFFFFF;
+  while (len > 0) {
+    uint32_t n = min(len, (uint32_t)sizeof(buf));
+    for (uint32_t i = 0; i < n; i++)
+      buf[i] = chr ? readChr(addr + i) : readPrg(addr + i);
+    crc = crc32Update(crc, buf, n);
+    Serial.write(buf, n);
+    addr += n;
+    len -= n;
+  }
+  Serial.printf("CRC %08lX\n", (unsigned long)(crc ^ 0xFFFFFFFF));
+}
+
+void loop() {
+  static String line;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c != '\n') {
+      if (c != '\r') line += c;
+      continue;
+    }
+    char cmd = line.length() ? line[0] : 0;
+    uint32_t addr = 0, len = 0;
+    sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
+    line = "";
+    switch (cmd) {
+      case 'V': Serial.print("famidump v0.2\n"); break;
+      case 'R': handleRead(false, addr, len); break;
+      case 'C': handleRead(true, addr, len); break;
+      case 'M': Serial.printf("%c\n", detectMirroring()); break;
+      default:  Serial.print("ERR\n"); break;
+    }
+  }
+}
