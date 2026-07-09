@@ -37,7 +37,7 @@ M5Stamp S3・コネクタ・ヘッダ類は国内の[スイッチサイエンス
 
 | 部品 | リファレンス | 個数 | 型番 / 仕様 | 入手先 |
 |---|---|---|---|---|
-| M5Stamp S3 | U1 | 1 | ESP32-S3 モジュール | [スイッチサイエンス](https://www.switch-science.com/search?q=M5Stamp+S3) / [秋月](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=M5Stamp) |
+| M5Stamp S3 | U1 | 1 | ESP32-S3 モジュール(M5StampS3A) | [スイッチサイエンス](https://www.switch-science.com/products/10377) / [秋月](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=M5Stamp) |
 | FC 60ピンスロットコネクタ | J1 | 1 | 2.54mmピッチ・ファミコン用 | [スイッチサイエンス検索](https://www.switch-science.com/search?q=%E3%82%AB%E3%83%BC%E3%83%89%E3%82%A8%E3%83%83%E3%82%B8) ※互換品(Amazon/AliExpress等)も可 |
 | 74HCT595(SOIC-16) | U2–U5 | 4 | シフトレジスタ / LCSC C70468 | [秋月(74HC595)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=74HC595) |
 | 74LVC245(SOIC-20) | U6, U7 | 2 | バスバッファ / LCSC C571201 | [秋月(74LVC245)](https://akizukidenshi.com/catalog/goods/search.aspx?keyword=74LVC245) |
