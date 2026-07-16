@@ -5,6 +5,8 @@
 //   R <addr_hex> <len_hex> -> PRG読み出し。"OK <len>\n" + 生データ + "CRC xxxxxxxx\n"
 //   C <addr_hex> <len_hex> -> CHR読み出し。同上
 //   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
+//   T                      -> セルフテスト。複数行レポートの最後に
+//                             "SELFTEST PASS\n" または "SELFTEST FAIL\n"
 //
 // データブロック直後の "CRC xxxxxxxx\n" は生データの CRC32
 // (IEEE 802.3 / zlib.crc32 互換、8桁大文字hex)。ホスト側で照合する。
@@ -148,6 +150,46 @@ void setup() {
   Serial.begin(115200);
 }
 
+// セルフテスト: カセット無しで実行できる範囲の健全性チェック。
+// 1) 出力GPIOがドライブできるか(High/Lowを実測して読み戻し)
+// 2) シフトレジスタへ walking-bit を流して "詰まり" なく送出できるか
+// 3) データバス(MD0-7)のフロート読み(参考値)
+// ※ 完全な導通試験には基準カセット吸い出しのCRC照合(ホスト側 factory_test)を併用。
+static void handleSelfTest() {
+  bool pass = true;
+
+  // 1) 制御用出力ピンの自己読み戻し(OUTPUTのまま digitalRead で確認)
+  const int outPins[] = {PIN_SR_DATA, PIN_SR_CLK, PIN_SR_LATCH, PIN_OE_PRG,
+                         PIN_OE_CHR, PIN_ROMSEL, PIN_M2, PIN_RW, PIN_PPU_RD, PIN_PPU_WR};
+  const char* outNames[] = {"SR_DATA", "SR_CLK", "SR_LATCH", "OE_PRG_N",
+                            "OE_CHR_N", "ROMSEL_N", "M2", "CPU_RW", "PPU_RD_N", "PPU_WR_N"};
+  int nOut = sizeof(outPins) / sizeof(outPins[0]);
+  for (int i = 0; i < nOut; i++) {
+    digitalWrite(outPins[i], HIGH);
+    bool hi = digitalRead(outPins[i]);
+    digitalWrite(outPins[i], LOW);
+    bool lo = digitalRead(outPins[i]);
+    bool ok = hi && !lo;
+    if (!ok) pass = false;
+    Serial.printf("PIN %-9s %s\n", outNames[i], ok ? "OK" : "NG");
+  }
+  busIdle();
+
+  // 2) シフトレジスタ walking-bit(送出できることの確認。出力の実値はカセット/治具が無いと未検証)
+  for (int b = 0; b < 32; b++) srWrite32(1UL << b);
+  srWrite32(SR_PPU_A13_N);
+  Serial.printf("SHIFT walking-bit x32 %s\n", "DONE");
+
+  // 3) データバス フロート読み(参考: 全ビット同一なら要注意という程度)
+  digitalWrite(PIN_OE_PRG, LOW);
+  delayMicroseconds(2);
+  uint8_t v = readDataBus();
+  digitalWrite(PIN_OE_PRG, HIGH);
+  Serial.printf("MD float read = 0x%02X\n", v);
+
+  Serial.printf("SELFTEST %s\n", pass ? "PASS" : "FAIL");
+}
+
 static void handleRead(bool chr, uint32_t addr, uint32_t len) {
   Serial.printf("OK %lX\n", (unsigned long)len);
   uint8_t buf[256];
@@ -181,6 +223,7 @@ void loop() {
       case 'R': handleRead(false, addr, len); break;
       case 'C': handleRead(true, addr, len); break;
       case 'M': Serial.printf("%c\n", detectMirroring()); break;
+      case 'T': handleSelfTest(); break;
       default:  Serial.print("ERR\n"); break;
     }
   }

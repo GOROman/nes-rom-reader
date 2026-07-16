@@ -9,7 +9,8 @@
 | ディレクトリ | 内容 |
 |---|---|
 | `firmware/` | M5Stamp S3 (ESP32-S3) ファームウェア(PlatformIO / Arduino) |
-| `host/` | PC側 Python CLI(USB CDCシリアル経由で吸い出し、.nes保存) |
+| `host/` | PC側 Python CLI(吸い出し `famidump.py` / 出荷テスト `factory_test.py`) |
+| `web/` | ブラウザ用 Web UI(WebSerial。吸い出し + 出荷テスト。インストール不要) |
 | `hardware/` | EasyEDA Pro プロジェクト・ガーバー・BOM・実装座標 |
 | `docs/` | 設計ドキュメント(ピンマップ、バス設計、60ピン配列) |
 
@@ -39,6 +40,35 @@ cd firmware && pio run -t upload
 # 吸い出し(NROM: PRG 32KB + CHR 8KB)
 python host/famidump.py --port /dev/tty.usbmodem* --prg 32 --chr 8 -o game.nes
 ```
+
+## Web UI(ブラウザから吸い出し)
+
+`web/index.html` を **Chrome / Edge**(デスクトップ)で開くだけ。WebSerialでM5Stamp S3に接続し、
+GUIで吸い出し・.nesダウンロード・出荷テストができます(Python不要)。
+
+```sh
+# ローカルで開く(file:// でも動くが、WebSerialは https か localhost 推奨)
+cd web && python3 -m http.server 8000   # → http://localhost:8000
+```
+
+## 出荷テスト(全数検査)
+
+組み立て後の基板が正しく動くかを、**基準カセット(既知CRCのカセット)** の吸い出しCRC照合で判定します。
+
+```sh
+# 1) 既知良品の基板で基準CRCを学習(基準カセットを挿して)
+python host/factory_test.py --port /dev/cu.usbmodem* --learn --name "MyRefCart"
+
+# 2) 各基板を検査(同じ基準カセットを挿して)。終了コード 0=PASS / 1=FAIL
+python host/factory_test.py --port /dev/cu.usbmodem* --test --name "MyRefCart"
+
+# カセット不要のセルフテストのみ(GPIO/シフトレジスタの健全性)
+python host/factory_test.py --port /dev/cu.usbmodem* --selftest
+```
+
+ファームの `T` コマンド(セルフテスト)は、出力ピンの読み戻し・シフトレジスタ送出・
+データバスのフロート読みを行い、最後に `SELFTEST PASS/FAIL` を返します。
+Web UIの「出荷テスト」タブからも同じ検査が実行できます。
 
 ## ドキュメント
 
