@@ -1,95 +1,136 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Famicom ROM Dumper — Web UI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#1a1a2e; --fg:#eaeaea; --accent:#e94560; --ok:#4caf50; --ng:#e94560; --panel:#16213e; }
+  /* Famicom palette: cream (body top) x maroon (body bottom / controller) x gold (logo) */
+  :root {
+    --cream:#d7cdb0; --cream-lt:#e8e1cc; --panel:#efe9d6;
+    --maroon:#9a201a; --maroon-dk:#6d1611; --gold:#c9a227;
+    --ink:#2a1d14; --white:#f5efdf; --ok:#3c8f3c; --ng:#9a201a; --info:#1f5c8b;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif;
-         background:var(--bg); color:var(--fg); line-height:1.6; }
-  header { background:var(--panel); padding:16px 24px; border-bottom:2px solid var(--accent); }
-  header h1 { margin:0; font-size:1.3rem; }
-  header .sub { font-size:.8rem; opacity:.7; }
+  body {
+    margin:0; background:var(--cream);
+    background-image: repeating-linear-gradient(0deg, rgba(0,0,0,.025) 0 2px, transparent 2px 4px);
+    color:var(--ink); line-height:1.7;
+    font-family: 'DotGothic16', "Hiragino Sans", sans-serif;
+  }
+  header {
+    background:var(--maroon); color:var(--white);
+    padding:18px 24px; border-bottom:6px solid var(--gold);
+    box-shadow: 0 4px 0 var(--maroon-dk); position:relative;
+  }
+  header h1 { margin:0; font-family:'Press Start 2P', 'DotGothic16', monospace;
+              font-size:1.05rem; color:var(--gold); text-shadow:2px 2px 0 var(--maroon-dk); letter-spacing:1px; }
+  header .sub { font-size:.85rem; opacity:.9; margin-top:8px; }
+  #langToggle {
+    position:absolute; top:16px; right:20px; background:var(--gold); color:var(--maroon);
+    border:2px solid var(--maroon-dk); border-radius:2px; padding:6px 12px; cursor:pointer;
+    font-family:'Press Start 2P',monospace; font-size:.6rem; box-shadow:2px 2px 0 var(--maroon-dk);
+  }
   main { max-width:820px; margin:0 auto; padding:24px; }
-  .card { background:var(--panel); border-radius:10px; padding:20px; margin-bottom:20px; }
-  .card h2 { margin:0 0 12px; font-size:1.05rem; border-left:4px solid var(--accent); padding-left:10px; }
-  button { background:var(--accent); color:#fff; border:none; border-radius:6px;
-           padding:10px 18px; font-size:.95rem; cursor:pointer; margin:4px 4px 4px 0; }
+  .card {
+    background:var(--panel); border:4px solid var(--maroon);
+    box-shadow: 6px 6px 0 var(--maroon-dk); border-radius:2px;
+    padding:20px; margin-bottom:26px;
+  }
+  .card h2 {
+    margin:0 0 14px; font-family:'Press Start 2P','DotGothic16',monospace; font-size:.8rem;
+    color:var(--maroon); background:var(--gold); display:inline-block;
+    padding:6px 12px; border-radius:2px; box-shadow:3px 3px 0 var(--maroon-dk);
+  }
+  button {
+    background:var(--maroon); color:var(--white); border:3px solid var(--gold);
+    border-radius:2px; padding:10px 18px; font-size:.95rem; cursor:pointer;
+    margin:4px 6px 4px 0; font-family:'DotGothic16',sans-serif;
+    box-shadow:3px 3px 0 var(--maroon-dk); transition:transform .05s, box-shadow .05s;
+  }
+  button:hover:not(:disabled) { transform:translate(1px,1px); box-shadow:2px 2px 0 var(--maroon-dk); }
+  button:active:not(:disabled) { transform:translate(3px,3px); box-shadow:0 0 0 var(--maroon-dk); }
   button:disabled { opacity:.4; cursor:not-allowed; }
-  button.secondary { background:#0f3460; }
+  button.secondary { background:var(--ink); border-color:var(--gold); }
   label { display:inline-block; margin:4px 12px 4px 0; }
-  input[type=number], select { background:#0f3460; color:var(--fg); border:1px solid #2a4a7a;
-           border-radius:5px; padding:6px 8px; width:90px; }
+  input[type=number], input[type=text], select {
+    background:var(--white); color:var(--ink); border:3px solid var(--maroon);
+    border-radius:2px; padding:6px 8px; width:90px; font-family:'DotGothic16',monospace;
+  }
   .row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-  .status { font-family: ui-monospace, monospace; font-size:.85rem; }
-  .badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:.8rem; font-weight:bold; }
-  .badge.on { background:var(--ok); } .badge.off { background:#555; }
-  #log { background:#0d0d1a; border-radius:6px; padding:12px; height:240px; overflow-y:auto;
-         font-family: ui-monospace, monospace; font-size:.8rem; white-space:pre-wrap; }
-  .log-ok { color:var(--ok); } .log-ng { color:var(--ng); } .log-info { color:#7aa2f7; }
-  progress { width:100%; height:14px; }
-  .warn { background:#3a2a10; border-left:4px solid #e0a020; padding:10px 14px; border-radius:5px; font-size:.85rem; }
-  .grid { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:.9rem; }
-  footer { text-align:center; opacity:.5; font-size:.75rem; padding:20px; }
-  a { color:#7aa2f7; }
+  .status { font-family:'DotGothic16', ui-monospace, monospace; font-size:.9rem; }
+  .badge {
+    display:inline-block; padding:4px 12px; border-radius:2px; font-size:.85rem; font-weight:bold;
+    border:2px solid var(--ink); color:var(--white);
+  }
+  .badge.on { background:var(--ok); } .badge.off { background:#8a7f63; }
+  #log {
+    background:var(--ink); border:3px solid var(--maroon-dk); border-radius:2px;
+    padding:12px; height:240px; overflow-y:auto; color:#d8cfb4;
+    font-family:'DotGothic16', ui-monospace, monospace; font-size:.85rem; white-space:pre-wrap;
+  }
+  .log-ok { color:#7ec87e; } .log-ng { color:#f08a80; } .log-info { color:#e8c964; }
+  progress { width:100%; height:16px; accent-color:var(--maroon); border:2px solid var(--maroon); }
+  .warn { background:#f0e0b0; border:3px solid var(--gold); border-left-width:8px;
+          padding:10px 14px; border-radius:2px; font-size:.85rem; color:var(--ink); }
+  .grid { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:.95rem; }
+  footer { text-align:center; opacity:.65; font-size:.75rem; padding:20px; }
+  a { color:var(--maroon); font-weight:bold; }
 </style>
 </head>
 <body>
 <header>
-  <h1>🎮 Famicom ROM Dumper</h1>
-  <div class="sub">Web UI (WebSerial) — Chrome / Edge 対応。M5Stamp S3 (famidump v0.2)</div>
+  <button id="langToggle">日本語</button>
+  <h1>▲ FAMICOM ROM DUMPER ▲</h1>
+  <div class="sub" data-i18n="sub"></div>
 </header>
 <main>
   <div class="card">
-    <h2>1. 接続</h2>
+    <h2 data-i18n="c1title"></h2>
     <div class="row">
-      <button id="btnConnect">🔌 デバイスに接続</button>
-      <button id="btnDisconnect" class="secondary" disabled>切断</button>
-      <span>状態: <span id="connBadge" class="badge off">未接続</span></span>
+      <button id="btnConnect" data-i18n="connect"></button>
+      <button id="btnDisconnect" class="secondary" disabled data-i18n="disconnect"></button>
+      <span><span data-i18n="statusLabel"></span> <span id="connBadge" class="badge off"></span></span>
     </div>
     <div id="devInfo" class="grid" style="margin-top:12px; display:none">
-      <div>ファーム:</div><div id="fwVer" class="status">-</div>
-      <div>ミラーリング:</div><div id="mirror" class="status">-</div>
+      <div data-i18n="fwLabel"></div><div id="fwVer" class="status">-</div>
+      <div data-i18n="mirrorLabel"></div><div id="mirror" class="status">-</div>
     </div>
-    <div class="warn" id="noSerialWarn" style="display:none; margin-top:12px">
-      このブラウザは WebSerial 非対応です。Chrome または Edge (デスクトップ) をご利用ください。
-    </div>
+    <div class="warn" id="noSerialWarn" style="display:none; margin-top:12px" data-i18n="noSerial"></div>
   </div>
 
   <div class="card">
-    <h2>2. 吸い出し</h2>
+    <h2 data-i18n="c2title"></h2>
     <div class="row">
-      <label>マッパー <input type="number" id="mapper" value="0" min="0" max="255"></label>
+      <label><span data-i18n="mapper"></span> <input type="number" id="mapper" value="0" min="0" max="255"></label>
       <label>PRG(KB) <input type="number" id="prg" value="32" min="0" step="16"></label>
       <label>CHR(KB) <input type="number" id="chr" value="8" min="0" step="8"></label>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="btnDump" disabled>⬇️ 吸い出して .nes 保存</button>
+      <button id="btnDump" disabled data-i18n="dump"></button>
     </div>
     <progress id="prog" value="0" max="100" style="margin-top:12px; display:none"></progress>
   </div>
 
   <div class="card">
-    <h2>3. 出荷テスト</h2>
-    <p style="font-size:.85rem; opacity:.8; margin:.2em 0">
-      基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば <b>PASS</b>。
-      組み立て後の全数検査用です。
-    </p>
+    <h2 data-i18n="c3title"></h2>
+    <p style="font-size:.85rem; opacity:.85; margin:.2em 0" data-i18n="testDesc"></p>
     <div class="row">
-      <label>基準PRG-CRC <input type="text" id="goldPrg" placeholder="8桁hex" style="width:110px"></label>
-      <label>基準CHR-CRC <input type="text" id="goldChr" placeholder="8桁hex(任意)" style="width:110px"></label>
+      <label><span data-i18n="goldPrgLabel"></span> <input type="text" id="goldPrg" placeholder="8-hex" style="width:110px"></label>
+      <label><span data-i18n="goldChrLabel"></span> <input type="text" id="goldChr" placeholder="8-hex" style="width:110px"></label>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="btnSelfTest" class="secondary" disabled>⚙️ セルフテスト(T)</button>
-      <button id="btnFactory" disabled>✅ 出荷テスト実行</button>
+      <button id="btnSelfTest" class="secondary" disabled data-i18n="selftest"></button>
+      <button id="btnFactory" disabled data-i18n="factory"></button>
       <span id="testResult" class="badge off" style="display:none"></span>
     </div>
   </div>
 
   <div class="card">
-    <h2>ログ</h2>
+    <h2 data-i18n="logTitle"></h2>
     <div id="log"></div>
   </div>
 </main>
@@ -99,7 +140,90 @@
 </footer>
 
 <script>
-// ---- CRC32 (IEEE 802.3 / zlib 互換) ----
+// ---- i18n ----
+const STRINGS = {
+  en: {
+    sub: "Family Computer Cartridge Reader — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.2",
+    c1title: "1. Connect", connect: "🔌 Connect Device", disconnect: "Disconnect",
+    statusLabel: "Status:", fwLabel: "Firmware:", mirrorLabel: "Mirroring:",
+    connected: "Connected", disconnected: "Disconnected",
+    noSerial: "This browser does not support WebSerial. Please use desktop Chrome or Edge.",
+    c2title: "2. Dump", mapper: "Mapper", dump: "⬇️ Dump & Save .nes",
+    c3title: "3. Factory Test",
+    testDesc: "Insert a reference cartridge (known CRC) and run. If the dumped CRC matches, result is PASS. For post-assembly 100% inspection.",
+    goldPrgLabel: "Ref PRG-CRC", goldChrLabel: "Ref CHR-CRC (opt)",
+    selftest: "⚙️ Self-Test (T)", factory: "✅ Run Factory Test", logTitle: "Log",
+    mirrorH: " (horizontal)", mirrorV: " (vertical)", mirrorQ: " (unknown / no cartridge)",
+    badResp: v => "Invalid device response: " + JSON.stringify(v),
+    connErr: e => "Connection failed: " + e,
+    connMsg: (v, m) => "Connected: " + v + " / mirroring " + m,
+    disconnected2: "Disconnected",
+    devErr: s => "Device error response: " + s,
+    crcMismatch: (d, h) => "CRC mismatch (device=" + d + " host=" + h + ")",
+    recv: (c, kb, crc) => "  " + c + ": " + kb + "KB received (CRC " + crc + " OK)",
+    dumpStart: (p, c, m, mi) => "Dump start (PRG " + p + "KB / CHR " + c + "KB / mapper " + m + " / mirror " + mi + ")",
+    allSame: v => "⚠ PRG is all identical (0x" + v + "). Cartridge may be missing / bad contact",
+    wrote: (n) => "✅ Written: dump.nes (" + n + " bytes)",
+    dumpFail: e => "Dump failed: " + e,
+    stRun: "Running self-test (T)...", stFail: e => "Self-test failed: " + e,
+    needRef: "Enter Ref PRG-CRC (record it from a known-good board first)",
+    needRefBadge: "NEED REF",
+    ftStart: "=== Factory test start ===",
+    prgNg: (g, r) => "✗ PRG-CRC mismatch (got " + g + " / ref " + r + ")",
+    prgOk: r => "✓ PRG-CRC match " + r,
+    chrNg: (g, r) => "✗ CHR-CRC mismatch (got " + g + " / ref " + r + ")",
+    chrOk: r => "✓ CHR-CRC match " + r,
+    pass: "=== PASS ===", fail: "=== FAIL ===", ftFail: e => "Factory test failed: " + e,
+    timeoutLine: "timeout (line)", timeoutByte: (a, b) => "timeout (" + a + "/" + b + " bytes)",
+    noCrcLine: l => "CRC line not received: " + l,
+  },
+  ja: {
+    sub: "ファミリーコンピュータ カセット読み出し — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.2",
+    c1title: "1. 接続", connect: "🔌 デバイスに接続", disconnect: "切断",
+    statusLabel: "状態:", fwLabel: "ファーム:", mirrorLabel: "ミラーリング:",
+    connected: "接続中", disconnected: "未接続",
+    noSerial: "このブラウザは WebSerial 非対応です。Chrome または Edge (デスクトップ) をご利用ください。",
+    c2title: "2. 吸い出し", mapper: "マッパー", dump: "⬇️ 吸い出して .nes 保存",
+    c3title: "3. 出荷テスト",
+    testDesc: "基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば PASS。組み立て後の全数検査用です。",
+    goldPrgLabel: "基準PRG-CRC", goldChrLabel: "基準CHR-CRC(任意)",
+    selftest: "⚙️ セルフテスト(T)", factory: "✅ 出荷テスト実行", logTitle: "ログ",
+    mirrorH: " (水平)", mirrorV: " (垂直)", mirrorQ: " (判定不能/カセット未挿入)",
+    badResp: v => "デバイス応答が不正: " + JSON.stringify(v),
+    connErr: e => "接続失敗: " + e,
+    connMsg: (v, m) => "接続: " + v + " / ミラーリング " + m,
+    disconnected2: "切断しました",
+    devErr: s => "デバイスエラー応答: " + s,
+    crcMismatch: (d, h) => "CRC不一致 (device=" + d + " host=" + h + ")",
+    recv: (c, kb, crc) => "  " + c + ": " + kb + "KB 受信 (CRC " + crc + " OK)",
+    dumpStart: (p, c, m, mi) => "吸い出し開始 (PRG " + p + "KB / CHR " + c + "KB / mapper " + m + " / mirror " + mi + ")",
+    allSame: v => "⚠ PRGが全バイト同一 (0x" + v + "). カセット未挿入/接触不良の可能性",
+    wrote: (n) => "✅ 書き出し完了: dump.nes (" + n + " bytes)",
+    dumpFail: e => "吸い出し失敗: " + e,
+    stRun: "セルフテスト(T)実行...", stFail: e => "セルフテスト失敗: " + e,
+    needRef: "基準PRG-CRCを入力してください(未取得なら既知良品で吸い出してCRCを記録)",
+    needRefBadge: "要基準値",
+    ftStart: "=== 出荷テスト開始 ===",
+    prgNg: (g, r) => "✗ PRG-CRC不一致 (got " + g + " / 基準 " + r + ")",
+    prgOk: r => "✓ PRG-CRC 一致 " + r,
+    chrNg: (g, r) => "✗ CHR-CRC不一致 (got " + g + " / 基準 " + r + ")",
+    chrOk: r => "✓ CHR-CRC 一致 " + r,
+    pass: "=== PASS ===", fail: "=== FAIL ===", ftFail: e => "出荷テスト失敗: " + e,
+    timeoutLine: "タイムアウト(行受信)", timeoutByte: (a, b) => "タイムアウト(" + a + "/" + b + "バイト)",
+    noCrcLine: l => "CRC行が受信できません: " + l,
+  },
+};
+let lang = (navigator.language || 'en').toLowerCase().startsWith('ja') ? 'ja' : 'en';
+const t = (k, ...a) => { const v = STRINGS[lang][k]; return typeof v === 'function' ? v(...a) : v; };
+function applyLang() {
+  document.documentElement.lang = lang;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.getElementById('langToggle').textContent = lang === 'ja' ? 'English' : '日本語';
+  const badge = document.getElementById('connBadge');
+  badge.textContent = t(port ? 'connected' : 'disconnected');
+}
+
+// ---- CRC32 (IEEE 802.3 / zlib compatible) ----
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -116,7 +240,7 @@ function crc32(bytes) {
 }
 const hex8 = n => (n >>> 0).toString(16).toUpperCase().padStart(8, '0');
 
-// ---- ログ ----
+// ---- log ----
 const logEl = document.getElementById('log');
 function log(msg, cls) {
   const span = document.createElement('span');
@@ -126,7 +250,7 @@ function log(msg, cls) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ---- シリアル ----
+// ---- serial ----
 let port = null, reader = null, writer = null;
 let rxBuf = new Uint8Array(0);
 
@@ -141,11 +265,10 @@ async function readLoop() {
       if (done) break;
       if (value) appendRx(value);
     }
-  } catch (e) { /* 切断時 */ }
+  } catch (e) { /* on disconnect */ }
 }
 function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// 改行までの1行を待つ
 async function readLine(timeoutMs = 5000) {
   const t0 = performance.now();
   while (performance.now() - t0 < timeoutMs) {
@@ -157,22 +280,19 @@ async function readLine(timeoutMs = 5000) {
     }
     await wait(5);
   }
-  throw new Error('タイムアウト(行受信)');
+  throw new Error(t('timeoutLine'));
 }
-// n バイトの生データを待つ
 async function readExact(n, timeoutMs = 20000) {
   const t0 = performance.now();
   while (rxBuf.length < n) {
-    if (performance.now() - t0 > timeoutMs) throw new Error(`タイムアウト(${rxBuf.length}/${n}バイト)`);
+    if (performance.now() - t0 > timeoutMs) throw new Error(t('timeoutByte', rxBuf.length, n));
     await wait(3);
   }
   const out = rxBuf.slice(0, n);
   rxBuf = rxBuf.slice(n);
   return out;
 }
-async function send(str) {
-  await writer.write(new TextEncoder().encode(str));
-}
+async function send(str) { await writer.write(new TextEncoder().encode(str)); }
 
 async function connect() {
   if (!('serial' in navigator)) { document.getElementById('noSerialWarn').style.display = 'block'; return; }
@@ -183,44 +303,43 @@ async function connect() {
     writer = port.writable.getWriter();
     rxBuf = new Uint8Array(0);
     readLoop();
-    await wait(1500); // ESP32 起動待ち
+    await wait(1500);
     rxBuf = new Uint8Array(0);
     await send('V\n');
     const ver = await readLine(3000);
-    if (!ver.includes('famidump')) { log('デバイス応答が不正: ' + JSON.stringify(ver), 'log-ng'); await disconnect(); return; }
+    if (!ver.includes('famidump')) { log(t('badResp', ver), 'log-ng'); await disconnect(); return; }
     await send('M\n');
     const m = await readLine(3000);
+    const mtxt = m === 'H' ? t('mirrorH') : m === 'V' ? t('mirrorV') : t('mirrorQ');
     document.getElementById('fwVer').textContent = ver;
-    document.getElementById('mirror').textContent = m + (m === 'H' ? ' (水平)' : m === 'V' ? ' (垂直)' : ' (判定不能/カセット未挿入)');
+    document.getElementById('mirror').textContent = m + mtxt;
     document.getElementById('devInfo').style.display = 'grid';
-    document.getElementById('connBadge').textContent = '接続中';
+    document.getElementById('connBadge').textContent = t('connected');
     document.getElementById('connBadge').className = 'badge on';
     for (const id of ['btnDump', 'btnFactory', 'btnSelfTest']) document.getElementById(id).disabled = false;
     document.getElementById('btnConnect').disabled = true;
     document.getElementById('btnDisconnect').disabled = false;
-    log('接続: ' + ver + ' / ミラーリング ' + m, 'log-ok');
-  } catch (e) { log('接続失敗: ' + e.message, 'log-ng'); }
+    log(t('connMsg', ver, m), 'log-ok');
+  } catch (e) { log(t('connErr', e.message), 'log-ng'); }
 }
 async function disconnect() {
   try { if (reader) { await reader.cancel().catch(()=>{}); reader.releaseLock(); } } catch(e){}
   try { if (writer) writer.releaseLock(); } catch(e){}
   try { if (port) await port.close(); } catch(e){}
   port = reader = writer = null;
-  document.getElementById('connBadge').textContent = '未接続';
+  document.getElementById('connBadge').textContent = t('disconnected');
   document.getElementById('connBadge').className = 'badge off';
   document.getElementById('devInfo').style.display = 'none';
   for (const id of ['btnDump', 'btnFactory', 'btnSelfTest']) document.getElementById(id).disabled = true;
   document.getElementById('btnConnect').disabled = false;
   document.getElementById('btnDisconnect').disabled = true;
-  log('切断しました', 'log-info');
+  log(t('disconnected2'), 'log-info');
 }
 
-// R / C コマンドで領域を読み出し、CRC照合して返す
 async function dumpRegion(cmd, addr, length, onProgress) {
   await send(`${cmd} ${addr.toString(16).toUpperCase()} ${length.toString(16).toUpperCase()}\n`);
   const status = await readLine(5000);
-  if (!status.startsWith('OK')) throw new Error(`デバイスエラー応答: ${status}`);
-  // 進捗表示のため小刻みに受信
+  if (!status.startsWith('OK')) throw new Error(t('devErr', status));
   const data = new Uint8Array(length);
   let got = 0;
   while (got < length) {
@@ -231,17 +350,17 @@ async function dumpRegion(cmd, addr, length, onProgress) {
     if (onProgress) onProgress(got / length);
   }
   const crcLine = await readLine(5000);
-  if (!crcLine.startsWith('CRC ')) throw new Error(`CRC行が受信できません: ${crcLine}`);
+  if (!crcLine.startsWith('CRC ')) throw new Error(t('noCrcLine', crcLine));
   const devCrc = parseInt(crcLine.split(' ')[1], 16) >>> 0;
   const hostCrc = crc32(data);
-  if (devCrc !== hostCrc) throw new Error(`CRC不一致 (device=${hex8(devCrc)} host=${hex8(hostCrc)})`);
-  log(`  ${cmd}: ${length / 1024}KB 受信 (CRC ${hex8(hostCrc)} OK)`, 'log-ok');
+  if (devCrc !== hostCrc) throw new Error(t('crcMismatch', hex8(devCrc), hex8(hostCrc)));
+  log(t('recv', cmd, length / 1024, hex8(hostCrc)), 'log-ok');
   return { data, crc: hostCrc };
 }
 
 function inesHeader(prgKb, chrKb, mapper, vertical) {
   const h = new Uint8Array(16);
-  h.set([0x4E, 0x45, 0x53, 0x1A]); // "NES\x1a"
+  h.set([0x4E, 0x45, 0x53, 0x1A]);
   h[4] = prgKb / 16; h[5] = chrKb / 8;
   h[6] = ((mapper & 0x0F) << 4) | (vertical ? 1 : 0);
   h[7] = mapper & 0xF0;
@@ -257,34 +376,32 @@ async function doDump() {
   document.getElementById('btnDump').disabled = true;
   try {
     await send('M\n'); const mirror = await readLine(3000);
-    log(`吸い出し開始 (PRG ${prgKb}KB / CHR ${chrKb}KB / mapper ${mapper} / mirror ${mirror})`, 'log-info');
+    log(t('dumpStart', prgKb, chrKb, mapper, mirror), 'log-info');
     const prg = await dumpRegion('R', 0x8000, prgKb * 1024, p => prog.value = p * (chrKb ? 50 : 100));
     let chr = { data: new Uint8Array(0) };
     if (chrKb) chr = await dumpRegion('C', 0x0000, chrKb * 1024, p => prog.value = 50 + p * 50);
-    if (new Set(prg.data).size === 1)
-      log(`⚠ PRGが全バイト同一 (0x${prg.data[0].toString(16)}). カセット未挿入/接触不良の可能性`, 'log-ng');
+    if (new Set(prg.data).size === 1) log(t('allSame', prg.data[0].toString(16)), 'log-ng');
     const header = inesHeader(prgKb, chrKb, mapper, mirror === 'V');
     const out = new Uint8Array(header.length + prg.data.length + chr.data.length);
     out.set(header); out.set(prg.data, header.length); out.set(chr.data, header.length + prg.data.length);
     const blob = new Blob([out], { type: 'application/octet-stream' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'dump.nes'; a.click();
-    log(`✅ 書き出し完了: dump.nes (${out.length} bytes)`, 'log-ok');
-  } catch (e) { log('吸い出し失敗: ' + e.message, 'log-ng'); }
+    log(t('wrote', out.length), 'log-ok');
+  } catch (e) { log(t('dumpFail', e.message), 'log-ng'); }
   finally { document.getElementById('btnDump').disabled = false; setTimeout(() => prog.style.display = 'none', 1500); }
 }
 
 async function doSelfTest() {
   document.getElementById('btnSelfTest').disabled = true;
   try {
-    log('セルフテスト(T)実行...', 'log-info');
+    log(t('stRun'), 'log-info');
     await send('T\n');
-    // 複数行のレポートを ~1.5秒収集
     const t0 = performance.now();
     while (performance.now() - t0 < 2000) {
       try { const line = await readLine(300); log('  ' + line); if (line.startsWith('SELFTEST')) break; } catch (e) { break; }
     }
-  } catch (e) { log('セルフテスト失敗: ' + e.message, 'log-ng'); }
+  } catch (e) { log(t('stFail', e.message), 'log-ng'); }
   finally { document.getElementById('btnSelfTest').disabled = false; }
 }
 
@@ -297,22 +414,22 @@ async function doFactoryTest() {
   badge.style.display = 'inline-block';
   document.getElementById('btnFactory').disabled = true;
   try {
-    if (!goldPrg) { log('基準PRG-CRCを入力してください(未取得なら既知良品で吸い出してCRCを記録)', 'log-ng'); badge.textContent='要基準値'; badge.className='badge off'; return; }
-    log('=== 出荷テスト開始 ===', 'log-info');
+    if (!goldPrg) { log(t('needRef'), 'log-ng'); badge.textContent = t('needRefBadge'); badge.className = 'badge off'; return; }
+    log(t('ftStart'), 'log-info');
     let pass = true;
     const prg = await dumpRegion('R', 0x8000, prgKb * 1024);
-    if (hex8(prg.crc) !== goldPrg) { log(`✗ PRG-CRC不一致 (got ${hex8(prg.crc)} / 基準 ${goldPrg})`, 'log-ng'); pass = false; }
-    else log(`✓ PRG-CRC 一致 ${goldPrg}`, 'log-ok');
+    if (hex8(prg.crc) !== goldPrg) { log(t('prgNg', hex8(prg.crc), goldPrg), 'log-ng'); pass = false; }
+    else log(t('prgOk', goldPrg), 'log-ok');
     if (chrKb && goldChr) {
       const chr = await dumpRegion('C', 0x0000, chrKb * 1024);
-      if (hex8(chr.crc) !== goldChr) { log(`✗ CHR-CRC不一致 (got ${hex8(chr.crc)} / 基準 ${goldChr})`, 'log-ng'); pass = false; }
-      else log(`✓ CHR-CRC 一致 ${goldChr}`, 'log-ok');
+      if (hex8(chr.crc) !== goldChr) { log(t('chrNg', hex8(chr.crc), goldChr), 'log-ng'); pass = false; }
+      else log(t('chrOk', goldChr), 'log-ok');
     }
     badge.textContent = pass ? 'PASS ✅' : 'FAIL ❌';
-    badge.className = 'badge ' + (pass ? 'on' : 'off');
+    badge.className = 'badge';
     badge.style.background = pass ? 'var(--ok)' : 'var(--ng)';
-    log(pass ? '=== PASS ===' : '=== FAIL ===', pass ? 'log-ok' : 'log-ng');
-  } catch (e) { log('出荷テスト失敗: ' + e.message, 'log-ng'); badge.textContent='FAIL ❌'; badge.className='badge'; badge.style.background='var(--ng)'; }
+    log(pass ? t('pass') : t('fail'), pass ? 'log-ok' : 'log-ng');
+  } catch (e) { log(t('ftFail', e.message), 'log-ng'); badge.textContent = 'FAIL ❌'; badge.className = 'badge'; badge.style.background = 'var(--ng)'; }
   finally { document.getElementById('btnFactory').disabled = false; }
 }
 
@@ -321,6 +438,9 @@ document.getElementById('btnDisconnect').onclick = disconnect;
 document.getElementById('btnDump').onclick = doDump;
 document.getElementById('btnSelfTest').onclick = doSelfTest;
 document.getElementById('btnFactory').onclick = doFactoryTest;
+document.getElementById('langToggle').onclick = () => { lang = lang === 'ja' ? 'en' : 'ja'; applyLang(); };
+
+applyLang();
 if (!('serial' in navigator)) document.getElementById('noSerialWarn').style.display = 'block';
 </script>
 </body>

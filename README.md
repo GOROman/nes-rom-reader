@@ -43,8 +43,11 @@ python host/famidump.py --port /dev/tty.usbmodem* --prg 32 --chr 8 -o game.nes
 
 ## Web UI(ブラウザから吸い出し)
 
+![Web UI](docs/images/webui.png)
+
 `web/index.html` を **Chrome / Edge**(デスクトップ)で開くだけ。WebSerialでM5Stamp S3に接続し、
-GUIで吸い出し・.nesダウンロード・出荷テストができます(Python不要)。
+GUIで吸い出し・.nesダウンロード・出荷テストができます(Python不要)。ファミコン配色 & ドットフォント、
+**日本語 / English 切替**対応。
 
 ```sh
 # ローカルで開く(file:// でも動くが、WebSerialは https か localhost 推奨)
