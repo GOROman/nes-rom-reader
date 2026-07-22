@@ -4,6 +4,9 @@
 
 Famicom(FC 60 针)卡带 ROM 读取工具。M5Stamp S3 + 专用电路板(用 EasyEDA Pro 设计)+ Python CLI / Web UI。
 
+### ▶ 立即在浏览器中试用(免安装): **https://goroman.github.io/nes-rom-reader/web/**
+用 Chrome / Edge(桌面或 Android)打开,连接 M5Stamp S3 即可开始读取。
+
 ![在实机上读取](docs/images/hero-dumping.jpeg)
 
 > 在实机上读取真实卡带(元祖西游记 超级猴子大冒险 / VAP 1986),
