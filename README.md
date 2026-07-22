@@ -125,6 +125,12 @@ Claude Code と EasyEDA Pro の連携には、WebSocketブリッジ拡張機能
 **[eext-run-api-gateway](https://github.com/easyeda/eext-run-api-gateway)** を使用しています。
 これにより、AIが EasyEDA Pro を直接操作して基板を設計できます。
 
+## リンク
+
+- リポジトリ: https://github.com/GOROman/nes-rom-reader
+- Web UI(公開版): https://goroman.github.io/nes-rom-reader/web/
+- 作者 X(Twitter): [@GOROman](https://x.com/GOROman)
+
 ---
 
 Powered by Claude Code (Fable 5) × EasyEDA Pro
