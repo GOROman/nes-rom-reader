@@ -130,6 +130,28 @@
   </div>
 
   <div class="card">
+    <h2 data-i18n="cViewerTitle"></h2>
+    <div class="row">
+      <label><span data-i18n="loadFileLabel"></span> <input type="file" id="chrFile" accept=".nes,.chr,.bin" style="width:auto"></label>
+      <button id="btnViewDump" class="secondary" disabled data-i18n="viewDump"></button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label><span data-i18n="paletteLabel"></span> <select id="palPreset" style="width:auto"></select></label>
+      <span id="palSwatches" style="display:inline-flex; gap:4px"></span>
+      <button id="btnCyclePal" class="secondary" data-i18n="cyclePal"></button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label><span data-i18n="scaleLabel"></span> <input type="range" id="scale" min="1" max="6" value="3" style="width:120px"></label>
+      <label><span data-i18n="tilesRowLabel"></span> <input type="number" id="tilesRow" value="16" min="8" max="32"></label>
+      <span id="viewerInfo" class="status" style="opacity:.8"></span>
+    </div>
+    <div style="margin-top:12px; overflow:auto; max-height:540px; border:3px solid var(--maroon); background:#000">
+      <canvas id="chrCanvas" style="image-rendering:pixelated; display:block"></canvas>
+    </div>
+    <p style="font-size:.75rem; opacity:.7; margin:.4em 0" data-i18n="viewerHint"></p>
+  </div>
+
+  <div class="card">
     <h2 data-i18n="c3title"></h2>
     <p style="font-size:.85rem; opacity:.85; margin:.2em 0" data-i18n="testDesc"></p>
     <div class="row">
@@ -168,6 +190,13 @@ const STRINGS = {
     stChecking: "Checking...", stPinsNg: "⚠ Control pins FAIL — check ESP32 GPIO wiring",
     statusLine: (m, p) => "READY / mirror " + m + " / pins " + p,
     c2title: "2. Dump", mapper: "Mapper", dump: "⬇️ Dump & Save .nes",
+    cViewerTitle: "🐵 CHR Viewer (Super Monkey Viewer)",
+    loadFileLabel: "Load .nes/.chr:", viewDump: "👁 View last dump",
+    paletteLabel: "Palette:", cyclePal: "🎨 Next palette",
+    scaleLabel: "Zoom:", tilesRowLabel: "Tiles/row:",
+    viewerHint: "8x8 tiles decoded from CHR (2bpp planar). Click a swatch to change that color. Also works offline: load a .nes or .chr file.",
+    noChr: "No CHR data (dump CHR first, or load a file)",
+    tilesInfo: (n, kb) => n + " tiles (" + kb + " KB)",
     c3title: "3. Factory Test",
     testDesc: "Insert a reference cartridge (known CRC) and run. If the dumped CRC matches, result is PASS. For post-assembly 100% inspection.",
     goldPrgLabel: "Ref PRG-CRC", goldChrLabel: "Ref CHR-CRC (opt)",
@@ -208,6 +237,13 @@ const STRINGS = {
     stChecking: "チェック中...", stPinsNg: "⚠ 制御ピンFAIL — ESP32のGPIO配線を確認",
     statusLine: (m, p) => "待機 / ミラー " + m + " / ピン " + p,
     c2title: "2. 吸い出し", mapper: "マッパー", dump: "⬇️ 吸い出して .nes 保存",
+    cViewerTitle: "🐵 CHRビューア (Super Monkey Viewer)",
+    loadFileLabel: ".nes/.chr読込:", viewDump: "👁 直近の吸い出しを表示",
+    paletteLabel: "パレット:", cyclePal: "🎨 次のパレット",
+    scaleLabel: "拡大:", tilesRowLabel: "1行タイル数:",
+    viewerHint: "CHR(2bpp平面)を8x8タイルにデコード表示。色見本をクリックでその色を変更。オフラインでも .nes/.chr を読み込めば表示可能。",
+    noChr: "CHRデータがありません(先にCHRを吸い出すかファイルを読込)",
+    tilesInfo: (n, kb) => n + " タイル (" + kb + " KB)",
     c3title: "3. 出荷テスト",
     testDesc: "基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば PASS。組み立て後の全数検査用です。",
     goldPrgLabel: "基準PRG-CRC", goldChrLabel: "基準CHR-CRC(任意)",
@@ -464,6 +500,7 @@ async function doDump() {
     a.href = URL.createObjectURL(blob); a.download = 'dump.nes'; a.click();
     log(t('wrote', out.length), 'log-ok');
     setStatus('ready');
+    if (chrKb && chr.data.length) { window.lastChr = chr.data; setChrData(chr.data); }  // Super Monkey Viewer に反映
   } catch (e) { log(t('dumpFail', e.message), 'log-ng'); setStatus('error'); }
   finally { document.getElementById('btnDump').disabled = false; setTimeout(() => prog.style.display = 'none', 1500); }
 }
@@ -509,6 +546,136 @@ async function doFactoryTest() {
   finally { document.getElementById('btnFactory').disabled = false; }
 }
 
+// ===== 🐵 Super Monkey Viewer (CHR-ROM タイルビューア) =====
+// NES 2C02 マスターパレット(64色)
+const NES_MASTER = [
+  '#626262','#001FB2','#2404C8','#5200B2','#730076','#800024','#730B00','#522800',
+  '#244400','#005700','#005C00','#005324','#003C76','#000000','#000000','#000000',
+  '#ABABAB','#0D57FF','#4B30FF','#8A13FF','#BC08D6','#D21269','#C72E00','#9D5400',
+  '#607B00','#209800','#00A300','#009942','#007DB4','#000000','#000000','#000000',
+  '#FFFFFF','#53AEFF','#9085FF','#D365FF','#FF57FF','#FF5DCF','#FF7757','#FA9E00',
+  '#BDC700','#7AE700','#43F611','#26EF7E','#2CD5F6','#4E4E4E','#000000','#000000',
+  '#FFFFFF','#B6E1FF','#CED1FF','#E9C3FF','#FFBCFF','#FFBDF4','#FFC6C3','#FFD59A',
+  '#E9E681','#CEF481','#B6FB9A','#A9FAC3','#A9F0F6','#B8B8B8','#000000','#000000'
+];
+// プリセット4色パレット(CSS色)
+const PAL_PRESETS = [
+  { name: 'Grayscale', colors: ['#000000', '#606060', '#B0B0B0', '#FFFFFF'] },
+  { name: 'Game Boy', colors: ['#0f380f', '#306230', '#8bac0f', '#9bbc0f'] },
+  { name: 'Mario', colors: ['#000000', '#B53120', '#FA9E00', '#FFFFFF'] },
+  { name: 'Green', colors: ['#000000', '#005700', '#43F611', '#B6FB9A'] },
+  { name: 'Blue', colors: ['#000000', '#001FB2', '#53AEFF', '#B6E1FF'] },
+  { name: 'Amber', colors: ['#1a0d00', '#7a4300', '#FA9E00', '#FFD59A'] },
+];
+let chrData = null;            // 表示中のCHRバイト列(Uint8Array)
+let curPal = PAL_PRESETS[0].colors.slice();
+let palIdx = 0;
+
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+
+function renderChr() {
+  const canvas = document.getElementById('chrCanvas');
+  const ctx = canvas.getContext('2d');
+  if (!chrData || chrData.length < 16) {
+    canvas.width = 1; canvas.height = 1;
+    document.getElementById('viewerInfo').textContent = t('noChr');
+    return;
+  }
+  const scale = +document.getElementById('scale').value;
+  const perRow = +document.getElementById('tilesRow').value;
+  const nTiles = Math.floor(chrData.length / 16);
+  const rows = Math.ceil(nTiles / perRow);
+  const w = perRow * 8, h = rows * 8;
+  // 1x のオフスクリーンに描いてから拡大
+  const off = document.createElement('canvas'); off.width = w; off.height = h;
+  const octx = off.getContext('2d');
+  const img = octx.createImageData(w, h);
+  const rgb = curPal.map(hexToRgb);
+  for (let ti = 0; ti < nTiles; ti++) {
+    const tx = (ti % perRow) * 8, ty = Math.floor(ti / perRow) * 8;
+    const base = ti * 16;
+    for (let y = 0; y < 8; y++) {
+      const p0 = chrData[base + y], p1 = chrData[base + y + 8];
+      for (let x = 0; x < 8; x++) {
+        const bit = 7 - x;
+        const c = ((p0 >> bit) & 1) | (((p1 >> bit) & 1) << 1);
+        const [r, g, b] = rgb[c];
+        const o = ((ty + y) * w + (tx + x)) * 4;
+        img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255;
+      }
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  canvas.width = w * scale; canvas.height = h * scale;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, 0, 0, w * scale, h * scale);
+  document.getElementById('viewerInfo').textContent = t('tilesInfo', nTiles, Math.round(chrData.length / 1024));
+}
+
+function renderSwatches() {
+  const box = document.getElementById('palSwatches');
+  box.innerHTML = '';
+  curPal.forEach((col, i) => {
+    const sw = document.createElement('span');
+    sw.style.cssText = `width:22px;height:22px;background:${col};border:2px solid #2a1d14;cursor:pointer;display:inline-block;box-shadow:1px 1px 0 #6d1611`;
+    sw.title = 'click: next color / 右クリック: prev';
+    // クリックでマスターパレットの次色へ / 右クリックで前色へ
+    const step = d => {
+      let idx = NES_MASTER.findIndex(c => c.toUpperCase() === col.toUpperCase());
+      if (idx < 0) idx = 0;
+      idx = (idx + d + NES_MASTER.length) % NES_MASTER.length;
+      curPal[i] = NES_MASTER[idx];
+      renderSwatches(); renderChr();
+    };
+    sw.onclick = () => step(1);
+    sw.oncontextmenu = e => { e.preventDefault(); step(-1); };
+    box.appendChild(sw);
+  });
+}
+
+function setPalette(colors) { curPal = colors.slice(); renderSwatches(); renderChr(); }
+
+function setChrData(data) {
+  chrData = data;
+  document.getElementById('btnViewDump').disabled = !window.lastChr || window.lastChr.length === 0;
+  renderChr();
+}
+
+// .nes / .chr / .bin を読み込んでCHRを表示
+function loadChrFile(file) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    const buf = new Uint8Array(fr.result);
+    let chr = buf;
+    // iNES ヘッダなら CHR 部分を切り出す
+    if (buf.length > 16 && buf[0] === 0x4E && buf[1] === 0x45 && buf[2] === 0x53 && buf[3] === 0x1A) {
+      const prg = buf[4] * 16384, chrLen = buf[5] * 8192;
+      if (chrLen === 0) { log('このROMはCHR-RAM (CHRデータ無し) / CHR-RAM ROM', 'log-ng'); return; }
+      chr = buf.slice(16 + prg, 16 + prg + chrLen);
+      log(`iNES読込: CHR ${chrLen / 1024}KB を抽出`, 'log-info');
+    } else {
+      log(`raw CHR読込: ${(buf.length / 1024).toFixed(1)}KB`, 'log-info');
+    }
+    setChrData(chr);
+    document.getElementById('chrCanvas').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+  fr.readAsArrayBuffer(file);
+}
+
+function initViewer() {
+  const sel = document.getElementById('palPreset');
+  PAL_PRESETS.forEach((p, i) => { const o = document.createElement('option'); o.value = i; o.textContent = p.name; sel.appendChild(o); });
+  sel.onchange = () => { palIdx = +sel.value; setPalette(PAL_PRESETS[palIdx].colors); };
+  document.getElementById('btnCyclePal').onclick = () => {
+    palIdx = (palIdx + 1) % PAL_PRESETS.length; sel.value = palIdx; setPalette(PAL_PRESETS[palIdx].colors);
+  };
+  document.getElementById('scale').oninput = renderChr;
+  document.getElementById('tilesRow').onchange = renderChr;
+  document.getElementById('chrFile').onchange = e => { if (e.target.files[0]) loadChrFile(e.target.files[0]); };
+  document.getElementById('btnViewDump').onclick = () => { if (window.lastChr) setChrData(window.lastChr); };
+  renderSwatches();
+}
+
 document.getElementById('btnConnect').onclick = connect;
 document.getElementById('btnDisconnect').onclick = disconnect;
 document.getElementById('btnDump').onclick = doDump;
@@ -517,6 +684,7 @@ document.getElementById('btnFactory').onclick = doFactoryTest;
 document.getElementById('btnStatus').onclick = checkStatus;
 document.getElementById('langToggle').onclick = () => { lang = lang === 'ja' ? 'en' : 'ja'; applyLang(); if (!port) setStatus('offline'); };
 
+initViewer();
 applyLang();
 setStatus('offline');
 if (!('serial' in navigator)) document.getElementById('noSerialWarn').style.display = 'block';
