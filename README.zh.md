@@ -35,6 +35,20 @@ Famicom(FC 60 针)卡带 ROM 读取工具。M5Stamp S3 + 专用电路板(用 Eas
 - **Mapper**:先支持 Mapper 0 (NROM);后续计划 CNROM / UNROM / MMC1
 - **上位机**:Python CLI(`host/famidump.py`),带 CRC32 校验并输出带 iNES 头的 `.nes` 文件
 
+## 支持情况与限制
+
+- ✅ **mapper 0 (NROM)** …… 完全支持(PRG 32KB + CHR 8KB),已在实机上验证读取。
+- ⚠️ **换库(bank switching)类 mapper(CNROM / UNROM / MMC1 等)暂不支持。**
+
+**原因(重要)**:换库需要向 mapper 寄存器**写入**,但本板的数据缓冲器(74LVC245)是
+**方向固定、只读(卡带 → ESP32)**。无法写入,因此不能切换 CHR/PRG 库。
+
+例如:**变形金刚 康宝伊之谜(Transformers: Convoy no Nazo,CNROM / mapper 3)**——
+可以读取 32KB 的 PRG,但 CHR 只能读到上电时的那 1 个库(8KB),其余 CHR 库需要写寄存器来切换。
+
+→ 若要支持 CNROM/UNROM/MMC1 等,需要**具备双向(可写)数据缓冲器的 v0.2 电路板**,
+以及执行换库操作的固件。
+
 ## 电路板
 
 - 双层板,双面铺 GND 铜,约 84 × 77 mm

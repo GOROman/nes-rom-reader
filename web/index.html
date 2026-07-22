@@ -79,12 +79,14 @@
   .grid { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:.95rem; }
   footer { text-align:center; opacity:.65; font-size:.75rem; padding:20px; }
   a { color:var(--maroon); font-weight:bold; }
-  /* 右上HUD: 通信状況 + デバイス状態 */
-  #hud { position:absolute; top:14px; right:18px; display:flex; align-items:center;
-         gap:10px; flex-wrap:wrap; justify-content:flex-end; max-width:62%; }
+  /* 右上HUD: 通信状況 + デバイス状態(通常フロー・折り返し安全) */
+  #hud { display:flex; align-items:center; gap:8px 12px; flex-wrap:wrap;
+         justify-content:flex-end; margin-bottom:12px; line-height:1.2; }
   #hudDot { width:18px; height:18px; border-radius:50%; background:#8a7f63;
-            border:2px solid var(--ink); box-shadow:1px 1px 0 var(--maroon-dk); display:inline-block; }
-  #hudText { font-size:.8rem; color:var(--white); font-family:'DotGothic16',monospace; }
+            border:2px solid var(--ink); box-shadow:1px 1px 0 var(--maroon-dk);
+            display:inline-block; flex:0 0 auto; }
+  #hudText { font-size:.8rem; color:var(--white); font-family:'DotGothic16',monospace; white-space:nowrap; }
+  #hud #langToggle { margin-left:6px; }
   /* Dump進捗ダイアログ */
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100;
            display:flex; align-items:center; justify-content:center; }

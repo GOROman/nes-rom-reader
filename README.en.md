@@ -35,6 +35,21 @@ Open it in Chrome / Edge (desktop or Android) and just connect your M5Stamp S3 t
 - **Mappers**: Mapper 0 (NROM) first; CNROM / UNROM / MMC1 planned
 - **Host**: Python CLI (`host/famidump.py`) writes a `.nes` file with an iNES header, CRC32-verified
 
+## Supported cartridges & limitations
+
+- ✅ **Mapper 0 (NROM)** … fully supported (PRG 32KB + CHR 8KB). Verified on real hardware.
+- ⚠️ **Bank-switched mappers (CNROM / UNROM / MMC1, etc.) are NOT supported yet.**
+
+**Why (important)**: bank switching requires **writing** to the mapper register, but this board's data
+buffers (74LVC245) are **fixed-direction, read-only (cartridge → ESP32)**. Without write capability we
+cannot switch CHR/PRG banks.
+
+Example: **Transformers: Convoy no Nazo** (CNROM / mapper 3) — its 32KB PRG can be dumped, but only the
+power-on CHR bank (8KB) is readable; the other CHR banks require a register write to select.
+
+→ Supporting CNROM/UNROM/MMC1 needs a **v0.2 board with bidirectional (write-capable) data buffers** plus
+firmware that performs the bank switching.
+
 ## Board
 
 - 2-layer, ground pour on both sides, approx. 84 × 77 mm
