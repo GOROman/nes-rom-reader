@@ -55,6 +55,7 @@
   button:active:not(:disabled) { transform:translate(3px,3px); box-shadow:0 0 0 var(--maroon-dk); }
   button:disabled { opacity:.4; cursor:not-allowed; }
   button.secondary { background:var(--ink); border-color:var(--gold); }
+  button.active { background:var(--gold); color:var(--maroon); }
   label { display:inline-block; margin:4px 12px 4px 0; }
   input[type=number], input[type=text], select {
     background:var(--white); color:var(--ink); border:3px solid var(--maroon);
@@ -196,6 +197,23 @@
       <canvas id="chrCanvas" style="image-rendering:pixelated; display:block"></canvas>
     </div>
     <p style="font-size:.75rem; opacity:.7; margin:.4em 0" data-i18n="viewerHint"></p>
+    <div class="row" style="margin-top:8px">
+      <button id="btnEditMode" class="secondary" data-i18n="editMode"></button>
+      <span id="selTile" class="status" style="opacity:.85"></span>
+    </div>
+    <div id="editTools" style="display:none; margin-top:8px">
+      <div class="row">
+        <button id="btnErase" class="secondary" data-i18n="erase"></button>
+        <label><span data-i18n="copyFromLabel"></span> <input type="number" id="copySrc" min="0" value="0" style="width:80px"></label>
+        <button id="btnPaste" class="secondary" data-i18n="pasteTile"></button>
+        <button id="btnUndoEdit" class="secondary" data-i18n="undoEdit"></button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnDlChr" data-i18n="dlChr"></button>
+        <button id="btnDlNes" data-i18n="dlNes"></button>
+      </div>
+      <p style="font-size:.75rem; opacity:.7; margin:.4em 0" data-i18n="editHint"></p>
+    </div>
   </div>
 
   <div class="card">
@@ -256,6 +274,12 @@ const STRINGS = {
     viewerHint: "8x8 tiles decoded from CHR (2bpp planar). Click a swatch to change that color. Also works offline: load a .nes or .chr file.",
     noChr: "No CHR data (dump CHR first, or load a file)",
     tilesInfo: (n, kb) => n + " tiles (" + kb + " KB)",
+    editMode: "🖉 Edit / Censor tiles",
+    erase: "Erase (blank)", copyFromLabel: "Copy from tile #", pasteTile: "Paste → selected",
+    undoEdit: "↶ Revert edits", dlChr: "💾 Download .chr", dlNes: "💾 Download .nes",
+    editHint: "Click a tile to select it, then Erase or paste another tile over it to censor a glyph/logo. CHR is pixel graphics (not text), so words cannot be auto-detected — edit the tiles you spot, then download.",
+    selInfo: n => "Selected tile: #" + n,
+    noNes: "No .nes source (this data was a raw .chr). Use Download .chr.",
     c3title: "3. Factory Test",
     testDesc: "Insert a reference cartridge (known CRC) and run. If the dumped CRC matches, result is PASS. For post-assembly 100% inspection.",
     goldPrgLabel: "Ref PRG-CRC", goldChrLabel: "Ref CHR-CRC (opt)",
@@ -306,6 +330,12 @@ const STRINGS = {
     viewerHint: "CHR(2bpp平面)を8x8タイルにデコード表示。色見本をクリックでその色を変更。オフラインでも .nes/.chr を読み込めば表示可能。",
     noChr: "CHRデータがありません(先にCHRを吸い出すかファイルを読込)",
     tilesInfo: (n, kb) => n + " タイル (" + kb + " KB)",
+    editMode: "🖉 タイル編集 / 修正",
+    erase: "消去(空白化)", copyFromLabel: "コピー元タイル #", pasteTile: "貼り付け → 選択中",
+    undoEdit: "↶ 編集を元に戻す", dlChr: "💾 .chr 保存", dlNes: "💾 .nes 保存",
+    editHint: "タイルをクリックして選択 → 「消去」または別タイルを貼り付けて字形/ロゴを修正します。CHRはピクセル画像(文字ではない)ため語句の自動検出はできません。見つけたタイルを編集して保存してください。",
+    selInfo: n => "選択中タイル: #" + n,
+    noNes: ".nes元データがありません(生の.chr読込のため)。「.chr 保存」をご利用ください。",
     c3title: "3. 出荷テスト",
     testDesc: "基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば PASS。組み立て後の全数検査用です。",
     goldPrgLabel: "基準PRG-CRC", goldChrLabel: "基準CHR-CRC(任意)",
@@ -583,7 +613,12 @@ async function doDump() {
     document.getElementById('dumpResult').style.display = 'block';
     log('PRG-CRC ' + window.lastPrgCrc + (chrKb ? ' / CHR-CRC ' + window.lastChrCrc : ''), 'log-ok');
     setStatus('ready');
-    if (chrKb && chr.data.length) { window.lastChr = chr.data; setChrData(chr.data); }  // Super Monkey Viewer に反映
+    if (chrKb && chr.data.length) {
+      window.lastChr = chr.data;
+      window.viewerNesHead = new Uint8Array(header.length + prg.data.length);
+      window.viewerNesHead.set(header); window.viewerNesHead.set(prg.data, header.length);  // 編集後.nes再生成用
+      setChrData(chr.data);  // Super Monkey Viewer に反映
+    }
   } catch (e) { log(t('dumpFail', e.message), 'log-ng'); setStatus('error'); }
   finally { document.getElementById('btnDump').disabled = false; setTimeout(() => dlg.style.display = 'none', 800); }
 }
@@ -676,6 +711,9 @@ let palIdx = 0;
 
 function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 
+let selectedTile = -1;   // 編集で選択中のタイル
+let chrOrig = null;      // 編集前バックアップ(元に戻す用)
+
 function renderChr() {
   const canvas = document.getElementById('chrCanvas');
   const ctx = canvas.getContext('2d');
@@ -712,7 +750,69 @@ function renderChr() {
   canvas.width = w * scale; canvas.height = h * scale;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(off, 0, 0, w * scale, h * scale);
+  canvas._perRow = perRow; canvas._scale = scale; canvas._nTiles = nTiles;
+  // 選択タイルの枠
+  if (selectedTile >= 0 && selectedTile < nTiles) {
+    const sx = (selectedTile % perRow) * 8 * scale, sy = Math.floor(selectedTile / perRow) * 8 * scale;
+    ctx.strokeStyle = '#e94560'; ctx.lineWidth = Math.max(2, scale);
+    ctx.strokeRect(sx + 0.5, sy + 0.5, 8 * scale - 1, 8 * scale - 1);
+  }
   document.getElementById('viewerInfo').textContent = t('tilesInfo', nTiles, Math.round(chrData.length / 1024));
+}
+
+// キャンバスクリック→タイル選択(編集モード時)
+function onCanvasClick(e) {
+  if (!document.getElementById('btnEditMode').classList.contains('active')) return;
+  const canvas = document.getElementById('chrCanvas');
+  if (!chrData || !canvas._perRow) return;
+  const r = canvas.getBoundingClientRect();
+  const px = (e.clientX - r.left) * (canvas.width / r.width);
+  const py = (e.clientY - r.top) * (canvas.height / r.height);
+  const tsz = 8 * canvas._scale;
+  const tx = Math.floor(px / tsz), ty = Math.floor(py / tsz);
+  const idx = ty * canvas._perRow + tx;
+  if (idx >= 0 && idx < canvas._nTiles) {
+    selectedTile = idx;
+    document.getElementById('selTile').textContent = t('selInfo', idx);
+    renderChr();
+  }
+}
+function eraseTile() {
+  if (selectedTile < 0 || !chrData) return;
+  const b = selectedTile * 16;
+  for (let i = 0; i < 16; i++) chrData[b + i] = 0;  // 全ピクセルを色0(通常は背景)に
+  renderChr();
+  log('タイル #' + selectedTile + ' を消去 / erased tile #' + selectedTile, 'log-info');
+}
+function pasteTile() {
+  if (selectedTile < 0 || !chrData) return;
+  const src = +document.getElementById('copySrc').value;
+  if (src < 0 || src * 16 + 16 > chrData.length) return;
+  const sb = src * 16, db = selectedTile * 16;
+  for (let i = 0; i < 16; i++) chrData[db + i] = chrData[sb + i];
+  renderChr();
+  log('タイル #' + src + ' → #' + selectedTile + ' に貼付 / pasted', 'log-info');
+}
+function undoEdits() {
+  if (!chrOrig) return;
+  chrData = chrOrig.slice();
+  window.lastChr = chrData;
+  renderChr();
+  log('編集を元に戻しました / edits reverted', 'log-info');
+}
+function download(bytes, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  a.download = name; a.click();
+}
+function downloadChr() { if (chrData) download(chrData, 'edited.chr'); }
+function downloadNes() {
+  if (!chrData) return;
+  if (!window.viewerNesHead) { log(t('noNes'), 'log-ng'); return; }
+  const head = window.viewerNesHead;
+  const out = new Uint8Array(head.length + chrData.length);
+  out.set(head); out.set(chrData, head.length);
+  download(out, 'edited.nes');
 }
 
 function renderSwatches() {
@@ -740,6 +840,9 @@ function setPalette(colors) { curPal = colors.slice(); renderSwatches(); renderC
 
 function setChrData(data) {
   chrData = data;
+  chrOrig = data ? data.slice() : null;  // 編集前バックアップ
+  selectedTile = -1;
+  document.getElementById('selTile').textContent = '';
   document.getElementById('btnViewDump').disabled = !window.lastChr || window.lastChr.length === 0;
   renderChr();
 }
@@ -754,9 +857,12 @@ function loadChrFile(file) {
     if (buf.length > 16 && buf[0] === 0x4E && buf[1] === 0x45 && buf[2] === 0x53 && buf[3] === 0x1A) {
       const prg = buf[4] * 16384, chrLen = buf[5] * 8192;
       if (chrLen === 0) { log('このROMはCHR-RAM (CHRデータ無し) / CHR-RAM ROM', 'log-ng'); return; }
-      chr = buf.slice(16 + prg, 16 + prg + chrLen);
+      const chrStart = 16 + prg;
+      chr = buf.slice(chrStart, chrStart + chrLen);
+      window.viewerNesHead = buf.slice(0, chrStart);  // header + PRG(編集後.nes再生成用)
       log(`iNES読込: CHR ${chrLen / 1024}KB を抽出`, 'log-info');
     } else {
+      window.viewerNesHead = null;  // 生CHRは.nes再生成不可
       log(`raw CHR読込: ${(buf.length / 1024).toFixed(1)}KB`, 'log-info');
     }
     setChrData(chr);
@@ -776,6 +882,21 @@ function initViewer() {
   document.getElementById('tilesRow').onchange = renderChr;
   document.getElementById('chrFile').onchange = e => { if (e.target.files[0]) loadChrFile(e.target.files[0]); };
   document.getElementById('btnViewDump').onclick = () => { if (window.lastChr) setChrData(window.lastChr); };
+  // タイル編集(修正)
+  document.getElementById('chrCanvas').addEventListener('click', onCanvasClick);
+  document.getElementById('btnEditMode').onclick = () => {
+    const b = document.getElementById('btnEditMode');
+    b.classList.toggle('active');
+    const on = b.classList.contains('active');
+    document.getElementById('editTools').style.display = on ? 'block' : 'none';
+    document.getElementById('chrCanvas').style.cursor = on ? 'crosshair' : 'default';
+    if (!on) { selectedTile = -1; document.getElementById('selTile').textContent = ''; renderChr(); }
+  };
+  document.getElementById('btnErase').onclick = eraseTile;
+  document.getElementById('btnPaste').onclick = pasteTile;
+  document.getElementById('btnUndoEdit').onclick = undoEdits;
+  document.getElementById('btnDlChr').onclick = downloadChr;
+  document.getElementById('btnDlNes').onclick = downloadNes;
   renderSwatches();
 }
 
