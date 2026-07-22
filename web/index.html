@@ -141,6 +141,7 @@
       <div data-i18n="mirrorLabel"></div><div id="mirror" class="status">-</div>
     </div>
     <div class="warn" id="noSerialWarn" style="display:none; margin-top:12px" data-i18n="noSerial"></div>
+    <div class="warn" id="androidHint" style="display:none; margin-top:12px" data-i18n="androidHint"></div>
   </div>
 
   <div class="card">
@@ -163,6 +164,13 @@
     </div>
     <div class="row" style="margin-top:8px">
       <button id="btnDump" disabled data-i18n="dump"></button>
+    </div>
+    <div id="dumpResult" style="margin-top:12px; display:none">
+      <div class="grid">
+        <div>PRG-CRC:</div><div id="resPrgCrc" class="status" style="font-size:1.05rem">-</div>
+        <div>CHR-CRC:</div><div id="resChrCrc" class="status" style="font-size:1.05rem">-</div>
+      </div>
+      <button id="btnUseCrc" class="secondary" style="margin-top:8px" data-i18n="useAsRef"></button>
     </div>
   </div>
 
@@ -229,6 +237,8 @@ const STRINGS = {
     statusLabel: "Status:", fwLabel: "Firmware:", mirrorLabel: "Mirroring:",
     connected: "Connected", disconnected: "Disconnected",
     noSerial: "This browser does not support WebSerial. Please use desktop Chrome or Edge.",
+    androidHint: "Android: connect the M5Stamp S3 via a USB-OTG adapter, then tap Connect and allow the USB/serial permission in the popup. If no port appears: (1) use an OTG adapter + data-capable cable, (2) unlock the phone and reconnect, (3) enable chrome://flags/#enable-experimental-web-platform-features. USB hubs and charge-only cables will not work.",
+    useAsRef: "→ Use these CRCs as factory-test reference",
     cStatusTitle: "Device Status", checkStatus: "🔄 Check Status",
     pinsLabel: "Control pins:", mdLabel: "Data bus (float):",
     stReady: "READY (green)", stBusy: "BUSY (blue)", stError: "ERROR (red)", stOffline: "OFFLINE",
@@ -277,6 +287,8 @@ const STRINGS = {
     statusLabel: "状態:", fwLabel: "ファーム:", mirrorLabel: "ミラーリング:",
     connected: "接続中", disconnected: "未接続",
     noSerial: "このブラウザは WebSerial 非対応です。Chrome または Edge (デスクトップ) をご利用ください。",
+    androidHint: "Android の場合: M5Stamp S3 を USB-OTG アダプタで接続し、「接続」をタップしてポップアップで USB/シリアルの許可を与えてください。ポートが出ない時は (1) OTGアダプタ+データ対応ケーブルを使う (2) 画面ロックを解除して挿し直す (3) chrome://flags/#enable-experimental-web-platform-features を有効化。USBハブや充電専用ケーブルでは動きません。",
+    useAsRef: "→ このCRCを出荷テストの基準に設定",
     cStatusTitle: "デバイス状態", checkStatus: "🔄 状態チェック",
     pinsLabel: "制御ピン:", mdLabel: "データバス(float):",
     stReady: "待機 (緑)", stBusy: "動作中 (青)", stError: "エラー (赤)", stOffline: "未接続",
@@ -559,6 +571,13 @@ async function doDump() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'dump.nes'; a.click();
     log(t('wrote', out.length), 'log-ok');
+    // PRG-CRC / CHR-CRC を結果欄に表示(出荷テスト基準にも使える)
+    window.lastPrgCrc = hex8(prg.crc);
+    window.lastChrCrc = chrKb ? hex8(chr.crc) : '';
+    document.getElementById('resPrgCrc').textContent = window.lastPrgCrc;
+    document.getElementById('resChrCrc').textContent = window.lastChrCrc || '(none)';
+    document.getElementById('dumpResult').style.display = 'block';
+    log('PRG-CRC ' + window.lastPrgCrc + (chrKb ? ' / CHR-CRC ' + window.lastChrCrc : ''), 'log-ok');
     setStatus('ready');
     if (chrKb && chr.data.length) { window.lastChr = chr.data; setChrData(chr.data); }  // Super Monkey Viewer に反映
   } catch (e) { log(t('dumpFail', e.message), 'log-ng'); setStatus('error'); }
@@ -763,11 +782,21 @@ document.getElementById('btnSelfTest').onclick = doSelfTest;
 document.getElementById('btnFactory').onclick = doFactoryTest;
 document.getElementById('btnStatus').onclick = checkStatus;
 document.getElementById('langToggle').onclick = () => { lang = lang === 'ja' ? 'en' : 'ja'; applyLang(); if (!port) setStatus('offline'); };
+// Dump結果のCRCを出荷テストの基準値にワンタップで設定
+document.getElementById('btnUseCrc').onclick = () => {
+  if (window.lastPrgCrc) document.getElementById('goldPrg').value = window.lastPrgCrc;
+  if (window.lastChrCrc) document.getElementById('goldChr').value = window.lastChrCrc;
+  log('出荷テスト基準にセットしました / set as factory-test reference', 'log-info');
+  document.getElementById('goldPrg').scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
 
 initViewer();
 applyLang();
 setStatus('offline');
 if (!('serial' in navigator)) document.getElementById('noSerialWarn').style.display = 'block';
+// Android は WebSerial の挙動が特殊なので接続ガイドを常時表示
+if (/Android/i.test(navigator.userAgent) && ('serial' in navigator))
+  document.getElementById('androidHint').style.display = 'block';
 </script>
 </body>
 </html>
