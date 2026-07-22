@@ -7,6 +7,9 @@
 ### ▶ ブラウザで今すぐ試す(インストール不要): **https://goroman.github.io/nes-rom-reader/web/**
 Chrome / Edge(デスクトップ or Android)で開き、M5Stamp S3を接続するだけで吸い出せます。
 
+> ✅ **動作確認済み(v1.0)**: v0.1基板の実機で、実カセット(mapper 0 / NROM)の
+> PRG・CHRを安定して吸い出せることを確認しました。
+
 ![実機で吸い出し中](docs/images/hero-dumping.jpeg)
 
 > 実機で本物のカセット(西遊記スーパーモンキー大冒険 / VAP 1986)を吸い出し、
