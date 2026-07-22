@@ -1,6 +1,11 @@
 # nes-rom-reader
 
-ファミコン(FC 60ピン)カセット吸い出しツール。M5Stamp S3 + 専用基板(EasyEDA Pro設計)+ Python CLI。
+ファミコン(FC 60ピン)カセット吸い出しツール。M5Stamp S3 + 専用基板(EasyEDA Pro設計)+ Python CLI / Web UI。
+
+![実機で吸い出し中](docs/images/hero-dumping.jpeg)
+
+> 実機で本物のカセット(西遊記スーパーモンキー大冒険 / VAP 1986)を吸い出し、
+> Web UI の「Super Monkey Viewer」でCHR-ROMのタイルを表示している様子。
 
 ![配線済みPCB](docs/images/pcb-routed.png)
 
@@ -48,6 +53,14 @@ python host/famidump.py --port /dev/tty.usbmodem* --prg 32 --chr 8 -o game.nes
 `web/index.html` を **Chrome / Edge**(デスクトップ)で開くだけ。WebSerialでM5Stamp S3に接続し、
 GUIで吸い出し・.nesダウンロード・出荷テストができます(Python不要)。ファミコン配色 & ドットフォント、
 **日本語 / English 切替**対応。
+
+### 🐵 Super Monkey Viewer(CHR-ROMビューア)
+
+![CHR Viewer](docs/images/chr-viewer.png)
+
+吸い出したCHR-ROM(2bpp平面フォーマット)を8x8タイルにデコード表示。NES 64色マスターパレットから
+4色を自由に変更でき、プリセット(Grayscale/Game Boy/Mario など)も切替可能。`.nes` / `.chr` ファイルの
+読み込みにも対応(ハード不要でオフライン閲覧可)。
 
 ```sh
 # ローカルで開く(file:// でも動くが、WebSerialは https か localhost 推奨)

@@ -79,11 +79,52 @@
   .grid { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:.95rem; }
   footer { text-align:center; opacity:.65; font-size:.75rem; padding:20px; }
   a { color:var(--maroon); font-weight:bold; }
+  /* 右上HUD: 通信状況 + デバイス状態 */
+  #hud { position:absolute; top:14px; right:18px; display:flex; align-items:center;
+         gap:10px; flex-wrap:wrap; justify-content:flex-end; max-width:62%; }
+  #hudDot { width:18px; height:18px; border-radius:50%; background:#8a7f63;
+            border:2px solid var(--ink); box-shadow:1px 1px 0 var(--maroon-dk); display:inline-block; }
+  #hudText { font-size:.8rem; color:var(--white); font-family:'DotGothic16',monospace; }
+  /* Dump進捗ダイアログ */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100;
+           display:flex; align-items:center; justify-content:center; }
+  .modal-box { background:var(--panel); border:5px solid var(--maroon);
+               box-shadow:8px 8px 0 var(--maroon-dk); border-radius:3px;
+               padding:26px 30px; min-width:340px; text-align:center; }
+  .modal-box h3 { margin:0 0 16px; font-family:'Press Start 2P',monospace; font-size:.8rem; color:var(--maroon); }
+  .modal-box progress { height:22px; }
+  #dumpDlgPct { margin-top:12px; font-family:'DotGothic16',monospace; font-size:1.1rem; color:var(--ink); }
+  /* Android / スマホ レスポンシブ (WebSerial は Android Chrome でも動作) */
+  @media (max-width: 640px) {
+    header { padding:14px 16px 12px; }
+    header h1 { font-size:.72rem; line-height:1.5; }
+    header .sub { font-size:.7rem; }
+    #hud { position:static; margin:0 0 10px; max-width:100%; justify-content:flex-start; }
+    main { padding:14px; }
+    .card { padding:14px; box-shadow:4px 4px 0 var(--maroon-dk); margin-bottom:18px; }
+    .card h2 { font-size:.65rem; }
+    button { padding:12px 16px; font-size:1rem; width:100%; margin:4px 0; }  /* タップしやすく */
+    button#langToggle, #hud button { width:auto; padding:8px 12px; }
+    .row { gap:10px; }
+    label { display:block; margin:6px 0; width:100%; }
+    input[type=number], input[type=text] { width:100%; max-width:160px; }
+    input[type=range] { width:100% !important; }
+    #log { height:180px; font-size:.8rem; }
+    .modal-box { min-width:auto; width:88vw; padding:20px; }
+    #palSwatches span { width:32px !important; height:32px !important; }  /* 指で押しやすく */
+    .grid { grid-template-columns:1fr; gap:2px 0; }
+    .grid > div:nth-child(odd) { font-weight:bold; opacity:.7; margin-top:6px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <button id="langToggle">日本語</button>
+  <div id="hud">
+    <span id="hudConn" class="badge off"></span>
+    <span id="hudDot"></span>
+    <span id="hudText"></span>
+    <button id="langToggle">日本語</button>
+  </div>
   <h1>▲ FAMICOM ROM DUMPER ▲</h1>
   <div class="sub" data-i18n="sub"></div>
 </header>
@@ -105,9 +146,6 @@
   <div class="card">
     <h2 data-i18n="cStatusTitle"></h2>
     <div class="row" style="align-items:center; gap:14px">
-      <span id="ledDot" style="width:26px; height:26px; border-radius:50%; background:#8a7f63;
-            border:3px solid var(--ink); box-shadow:2px 2px 0 var(--maroon-dk); display:inline-block"></span>
-      <span id="statusText" class="status" style="font-size:1.05rem">-</span>
       <button id="btnStatus" class="secondary" disabled data-i18n="checkStatus"></button>
     </div>
     <div id="statusDetail" class="grid" style="margin-top:12px; display:none">
@@ -126,7 +164,6 @@
     <div class="row" style="margin-top:8px">
       <button id="btnDump" disabled data-i18n="dump"></button>
     </div>
-    <progress id="prog" value="0" max="100" style="margin-top:12px; display:none"></progress>
   </div>
 
   <div class="card">
@@ -170,6 +207,14 @@
     <div id="log"></div>
   </div>
 </main>
+<div id="dumpDialog" class="modal" style="display:none">
+  <div class="modal-box">
+    <h3 id="dumpDlgTitle">DUMPING...</h3>
+    <progress id="prog" value="0" max="100"></progress>
+    <div id="dumpDlgPct">0%</div>
+  </div>
+</div>
+
 <footer>
   nes-rom-reader — Powered by Claude Code (Fable 5) ×
   <a href="https://github.com/GOROman/nes-rom-reader">GitHub</a>
@@ -217,6 +262,7 @@ const STRINGS = {
     needRef: "Enter Ref PRG-CRC (record it from a known-good board first)",
     needRefBadge: "NEED REF",
     ftStart: "=== Factory test start ===",
+    ftStep1: "① Self-test (LED steps ~1s each)...", ftStep2: "② PRG dump & CRC...", ftStep3: "③ CHR dump & CRC...",
     prgNg: (g, r) => "✗ PRG-CRC mismatch (got " + g + " / ref " + r + ")",
     prgOk: r => "✓ PRG-CRC match " + r,
     chrNg: (g, r) => "✗ CHR-CRC mismatch (got " + g + " / ref " + r + ")",
@@ -264,6 +310,7 @@ const STRINGS = {
     needRef: "基準PRG-CRCを入力してください(未取得なら既知良品で吸い出してCRCを記録)",
     needRefBadge: "要基準値",
     ftStart: "=== 出荷テスト開始 ===",
+    ftStep1: "① セルフテスト(LEDが1ステップ約1秒)...", ftStep2: "② PRG吸い出し & CRC...", ftStep3: "③ CHR吸い出し & CRC...",
     prgNg: (g, r) => "✗ PRG-CRC不一致 (got " + g + " / 基準 " + r + ")",
     prgOk: r => "✓ PRG-CRC 一致 " + r,
     chrNg: (g, r) => "✗ CHR-CRC不一致 (got " + g + " / 基準 " + r + ")",
@@ -286,11 +333,16 @@ function applyLang() {
 // ---- ステータス表示(内蔵LED色に連動) ----
 const LED_COLORS = { ready:'#3c8f3c', busy:'#1f5c8b', error:'#9a201a', offline:'#8a7f63', checking:'#c9a227' };
 function setStatus(state, extra) {
-  const dot = document.getElementById('ledDot');
-  const txt = document.getElementById('statusText');
+  const dot = document.getElementById('hudDot');
+  const txt = document.getElementById('hudText');
   dot.style.background = LED_COLORS[state] || LED_COLORS.offline;
   const map = { ready:'stReady', busy:'stBusy', error:'stError', offline:'stOffline', checking:'stChecking' };
   txt.textContent = (extra != null) ? extra : t(map[state] || 'stOffline');
+}
+function setConn(connected) {
+  const hc = document.getElementById('hudConn');
+  hc.textContent = t(connected ? 'connected' : 'disconnected');
+  hc.className = 'badge ' + (connected ? 'on' : 'off');
 }
 
 // ---- CRC32 (IEEE 802.3 / zlib compatible) ----
@@ -386,6 +438,7 @@ async function connect() {
     document.getElementById('devInfo').style.display = 'grid';
     document.getElementById('connBadge').textContent = t('connected');
     document.getElementById('connBadge').className = 'badge on';
+    setConn(true);
     for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus']) document.getElementById(id).disabled = false;
     document.getElementById('btnConnect').disabled = true;
     document.getElementById('btnDisconnect').disabled = false;
@@ -437,6 +490,7 @@ async function disconnect() {
   port = reader = writer = null;
   document.getElementById('connBadge').textContent = t('disconnected');
   document.getElementById('connBadge').className = 'badge off';
+  setConn(false);
   document.getElementById('devInfo').style.display = 'none';
   document.getElementById('statusDetail').style.display = 'none';
   setStatus('offline');
@@ -481,16 +535,22 @@ async function doDump() {
   const prgKb = +document.getElementById('prg').value;
   const chrKb = +document.getElementById('chr').value;
   const mapper = +document.getElementById('mapper').value;
+  const dlg = document.getElementById('dumpDialog');
   const prog = document.getElementById('prog');
-  prog.style.display = 'block'; prog.value = 0;
+  const setProg = (v, phase) => {
+    prog.value = v; document.getElementById('dumpDlgPct').textContent = Math.round(v) + '%';
+    if (phase) document.getElementById('dumpDlgTitle').textContent = phase;
+  };
+  dlg.style.display = 'flex'; setProg(0, 'PRG...');
   document.getElementById('btnDump').disabled = true;
   try {
     await send('M\n'); const mirror = await readLine(3000);
     log(t('dumpStart', prgKb, chrKb, mapper, mirror), 'log-info');
     setStatus('busy');
-    const prg = await dumpRegion('R', 0x8000, prgKb * 1024, p => prog.value = p * (chrKb ? 50 : 100));
+    const prg = await dumpRegion('R', 0x8000, prgKb * 1024, p => setProg(p * (chrKb ? 50 : 100), 'PRG...'));
     let chr = { data: new Uint8Array(0) };
-    if (chrKb) chr = await dumpRegion('C', 0x0000, chrKb * 1024, p => prog.value = 50 + p * 50);
+    if (chrKb) chr = await dumpRegion('C', 0x0000, chrKb * 1024, p => setProg(50 + p * 50, 'CHR...'));
+    setProg(100, 'DONE');
     if (new Set(prg.data).size === 1) log(t('allSame', prg.data[0].toString(16)), 'log-ng');
     const header = inesHeader(prgKb, chrKb, mapper, mirror === 'V');
     const out = new Uint8Array(header.length + prg.data.length + chr.data.length);
@@ -502,19 +562,21 @@ async function doDump() {
     setStatus('ready');
     if (chrKb && chr.data.length) { window.lastChr = chr.data; setChrData(chr.data); }  // Super Monkey Viewer に反映
   } catch (e) { log(t('dumpFail', e.message), 'log-ng'); setStatus('error'); }
-  finally { document.getElementById('btnDump').disabled = false; setTimeout(() => prog.style.display = 'none', 1500); }
+  finally { document.getElementById('btnDump').disabled = false; setTimeout(() => dlg.style.display = 'none', 800); }
 }
 
 async function doSelfTest() {
   document.getElementById('btnSelfTest').disabled = true;
   try {
     log(t('stRun'), 'log-info');
+    setStatus('busy');
     await send('T\n');
     const t0 = performance.now();
-    while (performance.now() - t0 < 2000) {
-      try { const line = await readLine(300); log('  ' + line); if (line.startsWith('SELFTEST')) break; } catch (e) { break; }
+    while (performance.now() - t0 < 25000) {  // 1ステップ約1秒×十数手順に対応
+      try { const line = await readLine(3000); log('  ' + line); if (line.startsWith('SELFTEST')) break; } catch (e) { break; }
     }
-  } catch (e) { log(t('stFail', e.message), 'log-ng'); }
+    setStatus('ready');
+  } catch (e) { log(t('stFail', e.message), 'log-ng'); setStatus('error'); }
   finally { document.getElementById('btnSelfTest').disabled = false; }
 }
 
@@ -529,18 +591,36 @@ async function doFactoryTest() {
   try {
     if (!goldPrg) { log(t('needRef'), 'log-ng'); badge.textContent = t('needRefBadge'); badge.className = 'badge off'; return; }
     log(t('ftStart'), 'log-info');
+    setStatus('busy');
     let pass = true;
+    // ① セルフテスト(ファーム側が1ステップ約1秒でLED点灯しながら進む)
+    log(t('ftStep1'), 'log-info');
+    await send('T\n');
+    let stPass = true;
+    const t0 = performance.now();
+    while (performance.now() - t0 < 25000) {
+      try { const line = await readLine(3000); log('  ' + line); if (line.startsWith('SELFTEST')) { stPass = line.endsWith('PASS'); break; } } catch (e) { break; }
+    }
+    if (!stPass) pass = false;
+    await wait(1000);
+    // ② PRG
+    log(t('ftStep2'), 'log-info');
     const prg = await dumpRegion('R', 0x8000, prgKb * 1024);
     if (hex8(prg.crc) !== goldPrg) { log(t('prgNg', hex8(prg.crc), goldPrg), 'log-ng'); pass = false; }
     else log(t('prgOk', goldPrg), 'log-ok');
+    await wait(1000);
+    // ③ CHR
     if (chrKb && goldChr) {
+      log(t('ftStep3'), 'log-info');
       const chr = await dumpRegion('C', 0x0000, chrKb * 1024);
       if (hex8(chr.crc) !== goldChr) { log(t('chrNg', hex8(chr.crc), goldChr), 'log-ng'); pass = false; }
       else log(t('chrOk', goldChr), 'log-ok');
+      await wait(1000);
     }
     badge.textContent = pass ? 'PASS ✅' : 'FAIL ❌';
     badge.className = 'badge';
     badge.style.background = pass ? 'var(--ok)' : 'var(--ng)';
+    setStatus(pass ? 'ready' : 'error');
     log(pass ? t('pass') : t('fail'), pass ? 'log-ok' : 'log-ng');
   } catch (e) { log(t('ftFail', e.message), 'log-ng'); badge.textContent = 'FAIL ❌'; badge.className = 'badge'; badge.style.background = 'var(--ng)'; }
   finally { document.getElementById('btnFactory').disabled = false; }

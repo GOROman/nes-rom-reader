@@ -197,12 +197,41 @@ static uint8_t readMdFloat() {
   return v;
 }
 
+static const uint32_t STEP_DELAY_MS = 1000;  // セルフテスト 1ステップの待ち時間
+
+// セルフテスト: 1ステップごとに約1秒待ちながら進める(LED: 青=検査中→緑/赤=結果)。
 static void handleSelfTest() {
-  bool pass = selfCheckPins(true);
+  bool pass = true;
+  const int outPins[] = {PIN_SR_DATA, PIN_SR_CLK, PIN_SR_LATCH, PIN_OE_PRG,
+                         PIN_OE_CHR, PIN_ROMSEL, PIN_M2, PIN_RW, PIN_PPU_RD, PIN_PPU_WR};
+  const char* outNames[] = {"SR_DATA", "SR_CLK", "SR_LATCH", "OE_PRG_N",
+                            "OE_CHR_N", "ROMSEL_N", "M2", "CPU_RW", "PPU_RD_N", "PPU_WR_N"};
+  int nOut = sizeof(outPins) / sizeof(outPins[0]);
+  for (int i = 0; i < nOut; i++) {
+    ledBusy();  // 青: 検査中
+    delay(150);
+    digitalWrite(outPins[i], HIGH);
+    bool hi = digitalRead(outPins[i]);
+    digitalWrite(outPins[i], LOW);
+    bool lo = digitalRead(outPins[i]);
+    bool ok = hi && !lo;
+    if (!ok) pass = false;
+    led(ok ? 0 : 60, ok ? 30 : 0, 0);  // 緑=OK / 赤=NG
+    Serial.printf("PIN %-9s %s\n", outNames[i], ok ? "OK" : "NG");
+    delay(STEP_DELAY_MS);
+  }
+  busIdle();
+
+  ledBusy(); delay(150);
   for (int b = 0; b < 32; b++) srWrite32(1UL << b);  // シフトレジスタ walking-bit 送出確認
   srWrite32(SR_PPU_A13_N);
-  Serial.printf("SHIFT walking-bit x32 %s\n", "DONE");
+  Serial.printf("SHIFT walking-bit x32 DONE\n");
+  delay(STEP_DELAY_MS);
+
+  ledBusy(); delay(150);
   Serial.printf("MD float read = 0x%02X\n", readMdFloat());
+  delay(STEP_DELAY_MS);
+
   Serial.printf("SELFTEST %s\n", pass ? "PASS" : "FAIL");
   if (pass) ledReady(); else ledError();  // 合格=緑 / 不合格=赤点滅
 }
