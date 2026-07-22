@@ -1,5 +1,7 @@
 # nes-rom-reader
 
+**日本語** | [English](README.en.md) | [简体中文](README.zh.md)
+
 ファミコン(FC 60ピン)カセット吸い出しツール。M5Stamp S3 + 専用基板(EasyEDA Pro設計)+ Python CLI / Web UI。
 
 ![実機で吸い出し中](docs/images/hero-dumping.jpeg)
