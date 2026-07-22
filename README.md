@@ -4,6 +4,9 @@
 
 ファミコン(FC 60ピン)カセット吸い出しツール。M5Stamp S3 + 専用基板(EasyEDA Pro設計)+ Python CLI / Web UI。
 
+### ▶ ブラウザで今すぐ試す(インストール不要): **https://goroman.github.io/nes-rom-reader/web/**
+Chrome / Edge(デスクトップ or Android)で開き、M5Stamp S3を接続するだけで吸い出せます。
+
 ![実機で吸い出し中](docs/images/hero-dumping.jpeg)
 
 > 実機で本物のカセット(西遊記スーパーモンキー大冒険 / VAP 1986)を吸い出し、
@@ -51,6 +54,8 @@ python host/famidump.py --port /dev/tty.usbmodem* --prg 32 --chr 8 -o game.nes
 ## Web UI(ブラウザから吸い出し)
 
 ![Web UI](docs/images/webui.png)
+
+**公開版: https://goroman.github.io/nes-rom-reader/web/**(GitHub Pages。HTTPSなのでWebSerialがそのまま動作)
 
 `web/index.html` を **Chrome / Edge**(デスクトップ)で開くだけ。WebSerialでM5Stamp S3に接続し、
 GUIで吸い出し・.nesダウンロード・出荷テストができます(Python不要)。ファミコン配色 & ドットフォント、

@@ -4,6 +4,9 @@
 
 A Famicom (FC 60-pin) cartridge ROM dumper. M5Stamp S3 + custom PCB (designed in EasyEDA Pro) + Python CLI / Web UI.
 
+### ▶ Try it now in your browser (no install): **https://goroman.github.io/nes-rom-reader/web/**
+Open it in Chrome / Edge (desktop or Android) and just connect your M5Stamp S3 to start dumping.
+
 ![Dumping on real hardware](docs/images/hero-dumping.jpeg)
 
 > Dumping a real cartridge (Ganso Saiyuki: Super Monkey Daibouken / VAP 1986) on actual hardware,
