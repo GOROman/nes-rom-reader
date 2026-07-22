@@ -119,6 +119,12 @@ Claude Code drives EasyEDA Pro through the WebSocket bridge extension
 **[eext-run-api-gateway](https://github.com/easyeda/eext-run-api-gateway)**, which lets the AI operate
 EasyEDA Pro directly to design the board.
 
+## Links
+
+- Repository: https://github.com/GOROman/nes-rom-reader
+- Web UI (live): https://goroman.github.io/nes-rom-reader/web/
+- Author on X (Twitter): [@GOROman](https://x.com/GOROman)
+
 ---
 
 Powered by Claude Code (Fable 5) × EasyEDA Pro
