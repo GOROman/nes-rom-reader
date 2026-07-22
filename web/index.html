@@ -103,6 +103,20 @@
   </div>
 
   <div class="card">
+    <h2 data-i18n="cStatusTitle"></h2>
+    <div class="row" style="align-items:center; gap:14px">
+      <span id="ledDot" style="width:26px; height:26px; border-radius:50%; background:#8a7f63;
+            border:3px solid var(--ink); box-shadow:2px 2px 0 var(--maroon-dk); display:inline-block"></span>
+      <span id="statusText" class="status" style="font-size:1.05rem">-</span>
+      <button id="btnStatus" class="secondary" disabled data-i18n="checkStatus"></button>
+    </div>
+    <div id="statusDetail" class="grid" style="margin-top:12px; display:none">
+      <div data-i18n="pinsLabel"></div><div id="stPins" class="status">-</div>
+      <div data-i18n="mdLabel"></div><div id="stMd" class="status">-</div>
+    </div>
+  </div>
+
+  <div class="card">
     <h2 data-i18n="c2title"></h2>
     <div class="row">
       <label><span data-i18n="mapper"></span> <input type="number" id="mapper" value="0" min="0" max="255"></label>
@@ -148,6 +162,11 @@ const STRINGS = {
     statusLabel: "Status:", fwLabel: "Firmware:", mirrorLabel: "Mirroring:",
     connected: "Connected", disconnected: "Disconnected",
     noSerial: "This browser does not support WebSerial. Please use desktop Chrome or Edge.",
+    cStatusTitle: "Device Status", checkStatus: "🔄 Check Status",
+    pinsLabel: "Control pins:", mdLabel: "Data bus (float):",
+    stReady: "READY (green)", stBusy: "BUSY (blue)", stError: "ERROR (red)", stOffline: "OFFLINE",
+    stChecking: "Checking...", stPinsNg: "⚠ Control pins FAIL — check ESP32 GPIO wiring",
+    statusLine: (m, p) => "READY / mirror " + m + " / pins " + p,
     c2title: "2. Dump", mapper: "Mapper", dump: "⬇️ Dump & Save .nes",
     c3title: "3. Factory Test",
     testDesc: "Insert a reference cartridge (known CRC) and run. If the dumped CRC matches, result is PASS. For post-assembly 100% inspection.",
@@ -183,6 +202,11 @@ const STRINGS = {
     statusLabel: "状態:", fwLabel: "ファーム:", mirrorLabel: "ミラーリング:",
     connected: "接続中", disconnected: "未接続",
     noSerial: "このブラウザは WebSerial 非対応です。Chrome または Edge (デスクトップ) をご利用ください。",
+    cStatusTitle: "デバイス状態", checkStatus: "🔄 状態チェック",
+    pinsLabel: "制御ピン:", mdLabel: "データバス(float):",
+    stReady: "待機 (緑)", stBusy: "動作中 (青)", stError: "エラー (赤)", stOffline: "未接続",
+    stChecking: "チェック中...", stPinsNg: "⚠ 制御ピンFAIL — ESP32のGPIO配線を確認",
+    statusLine: (m, p) => "待機 / ミラー " + m + " / ピン " + p,
     c2title: "2. 吸い出し", mapper: "マッパー", dump: "⬇️ 吸い出して .nes 保存",
     c3title: "3. 出荷テスト",
     testDesc: "基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば PASS。組み立て後の全数検査用です。",
@@ -221,6 +245,16 @@ function applyLang() {
   document.getElementById('langToggle').textContent = lang === 'ja' ? 'English' : '日本語';
   const badge = document.getElementById('connBadge');
   badge.textContent = t(port ? 'connected' : 'disconnected');
+}
+
+// ---- ステータス表示(内蔵LED色に連動) ----
+const LED_COLORS = { ready:'#3c8f3c', busy:'#1f5c8b', error:'#9a201a', offline:'#8a7f63', checking:'#c9a227' };
+function setStatus(state, extra) {
+  const dot = document.getElementById('ledDot');
+  const txt = document.getElementById('statusText');
+  dot.style.background = LED_COLORS[state] || LED_COLORS.offline;
+  const map = { ready:'stReady', busy:'stBusy', error:'stError', offline:'stOffline', checking:'stChecking' };
+  txt.textContent = (extra != null) ? extra : t(map[state] || 'stOffline');
 }
 
 // ---- CRC32 (IEEE 802.3 / zlib compatible) ----
@@ -316,11 +350,49 @@ async function connect() {
     document.getElementById('devInfo').style.display = 'grid';
     document.getElementById('connBadge').textContent = t('connected');
     document.getElementById('connBadge').className = 'badge on';
-    for (const id of ['btnDump', 'btnFactory', 'btnSelfTest']) document.getElementById(id).disabled = false;
+    for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus']) document.getElementById(id).disabled = false;
     document.getElementById('btnConnect').disabled = true;
     document.getElementById('btnDisconnect').disabled = false;
     log(t('connMsg', ver, m), 'log-ok');
-  } catch (e) { log(t('connErr', e.message), 'log-ng'); }
+    await checkStatus();  // 接続直後に状態取得
+  } catch (e) { log(t('connErr', e.message), 'log-ng'); setStatus('error'); }
+}
+
+// S コマンドで機械可読ステータスを取得しUIに反映
+async function checkStatus() {
+  if (!port) return;
+  setStatus('checking');
+  document.getElementById('btnStatus').disabled = true;
+  try {
+    rxBuf = new Uint8Array(0);
+    await send('S\n');
+    let line = '';
+    const t0 = performance.now();
+    while (performance.now() - t0 < 3000) {
+      line = await readLine(3000);
+      if (line.startsWith('STATUS')) break;
+    }
+    // 例: "STATUS famidump-v0.2 mirror=? pins=PASS md=0x20"
+    const mMirror = line.match(/mirror=(\S+)/);
+    const mPins = line.match(/pins=(\S+)/);
+    const mMd = line.match(/md=(\S+)/);
+    const mirror = mMirror ? mMirror[1] : '?';
+    const pins = mPins ? mPins[1] : '?';
+    const md = mMd ? mMd[1] : '?';
+    document.getElementById('statusDetail').style.display = 'grid';
+    document.getElementById('stPins').textContent = pins;
+    document.getElementById('stMd').textContent = md;
+    document.getElementById('mirror').textContent = mirror +
+      (mirror === 'H' ? t('mirrorH') : mirror === 'V' ? t('mirrorV') : t('mirrorQ'));
+    if (pins === 'PASS') {
+      setStatus('ready', t('statusLine', mirror, pins));
+      log('STATUS: ' + line.replace('STATUS ', ''), 'log-ok');
+    } else {
+      setStatus('error', t('stPinsNg'));
+      log(t('stPinsNg'), 'log-ng');
+    }
+  } catch (e) { log('状態取得失敗 / status failed: ' + e.message, 'log-ng'); setStatus('error'); }
+  finally { if (port) document.getElementById('btnStatus').disabled = false; }
 }
 async function disconnect() {
   try { if (reader) { await reader.cancel().catch(()=>{}); reader.releaseLock(); } } catch(e){}
@@ -330,7 +402,9 @@ async function disconnect() {
   document.getElementById('connBadge').textContent = t('disconnected');
   document.getElementById('connBadge').className = 'badge off';
   document.getElementById('devInfo').style.display = 'none';
-  for (const id of ['btnDump', 'btnFactory', 'btnSelfTest']) document.getElementById(id).disabled = true;
+  document.getElementById('statusDetail').style.display = 'none';
+  setStatus('offline');
+  for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus']) document.getElementById(id).disabled = true;
   document.getElementById('btnConnect').disabled = false;
   document.getElementById('btnDisconnect').disabled = true;
   log(t('disconnected2'), 'log-info');
@@ -377,6 +451,7 @@ async function doDump() {
   try {
     await send('M\n'); const mirror = await readLine(3000);
     log(t('dumpStart', prgKb, chrKb, mapper, mirror), 'log-info');
+    setStatus('busy');
     const prg = await dumpRegion('R', 0x8000, prgKb * 1024, p => prog.value = p * (chrKb ? 50 : 100));
     let chr = { data: new Uint8Array(0) };
     if (chrKb) chr = await dumpRegion('C', 0x0000, chrKb * 1024, p => prog.value = 50 + p * 50);
@@ -388,7 +463,8 @@ async function doDump() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'dump.nes'; a.click();
     log(t('wrote', out.length), 'log-ok');
-  } catch (e) { log(t('dumpFail', e.message), 'log-ng'); }
+    setStatus('ready');
+  } catch (e) { log(t('dumpFail', e.message), 'log-ng'); setStatus('error'); }
   finally { document.getElementById('btnDump').disabled = false; setTimeout(() => prog.style.display = 'none', 1500); }
 }
 
@@ -438,9 +514,11 @@ document.getElementById('btnDisconnect').onclick = disconnect;
 document.getElementById('btnDump').onclick = doDump;
 document.getElementById('btnSelfTest').onclick = doSelfTest;
 document.getElementById('btnFactory').onclick = doFactoryTest;
-document.getElementById('langToggle').onclick = () => { lang = lang === 'ja' ? 'en' : 'ja'; applyLang(); };
+document.getElementById('btnStatus').onclick = checkStatus;
+document.getElementById('langToggle').onclick = () => { lang = lang === 'ja' ? 'en' : 'ja'; applyLang(); if (!port) setStatus('offline'); };
 
 applyLang();
+setStatus('offline');
 if (!('serial' in navigator)) document.getElementById('noSerialWarn').style.display = 'block';
 </script>
 </body>

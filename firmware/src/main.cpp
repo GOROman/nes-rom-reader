@@ -27,6 +27,17 @@ static const int PIN_RW       = 1;   // CPU R/W High=Read
 static const int PIN_PPU_RD   = 2;   // PPU /RD 負論理
 static const int PIN_PPU_WR   = 3;   // PPU /WR 負論理
 static const int PIN_CIRAM_A10 = 46; // 入力 (10k/20k分圧で5V→3.3V)
+static const int PIN_LED       = 21; // M5Stamp S3 内蔵 WS2812 RGB LED
+
+// --- ステータスLED (内蔵WS2812) ---
+// 緑=待機/正常、青=読み出し中、赤点滅=エラー。明るさは控えめ。
+static void led(uint8_t r, uint8_t g, uint8_t b) { neopixelWrite(PIN_LED, r, g, b); }
+static void ledReady() { led(0, 24, 0); }   // 緑: 電源ON/待機
+static void ledBusy()  { led(0, 0, 30); }   // 青: 吸い出し中
+static void ledError() {                     // 赤点滅 → 緑へ復帰
+  for (int i = 0; i < 4; i++) { led(48, 0, 0); delay(120); led(0, 0, 0); delay(120); }
+  ledReady();
+}
 
 // --- シフトレジスタ 32bit ビット割り当て (U2→U3→U4→U5 直列) ---
 // srWrite32() は bit31 から MSBファーストで送出するため、32クロック後に
@@ -148,6 +159,7 @@ void setup() {
   busIdle();
   srWrite32(SR_PPU_A13_N);  // アイドル時も PPU /A13=1 (PPU A13=0)
   Serial.begin(115200);
+  ledReady();               // 電源ON = 緑
 }
 
 // セルフテスト: カセット無しで実行できる範囲の健全性チェック。
@@ -155,10 +167,9 @@ void setup() {
 // 2) シフトレジスタへ walking-bit を流して "詰まり" なく送出できるか
 // 3) データバス(MD0-7)のフロート読み(参考値)
 // ※ 完全な導通試験には基準カセット吸い出しのCRC照合(ホスト側 factory_test)を併用。
-static void handleSelfTest() {
+// 制御用出力ピンの自己読み戻しチェック。verbose時は各ピンの結果を出力。
+static bool selfCheckPins(bool verbose) {
   bool pass = true;
-
-  // 1) 制御用出力ピンの自己読み戻し(OUTPUTのまま digitalRead で確認)
   const int outPins[] = {PIN_SR_DATA, PIN_SR_CLK, PIN_SR_LATCH, PIN_OE_PRG,
                          PIN_OE_CHR, PIN_ROMSEL, PIN_M2, PIN_RW, PIN_PPU_RD, PIN_PPU_WR};
   const char* outNames[] = {"SR_DATA", "SR_CLK", "SR_LATCH", "OE_PRG_N",
@@ -171,26 +182,43 @@ static void handleSelfTest() {
     bool lo = digitalRead(outPins[i]);
     bool ok = hi && !lo;
     if (!ok) pass = false;
-    Serial.printf("PIN %-9s %s\n", outNames[i], ok ? "OK" : "NG");
+    if (verbose) Serial.printf("PIN %-9s %s\n", outNames[i], ok ? "OK" : "NG");
   }
   busIdle();
+  return pass;
+}
 
-  // 2) シフトレジスタ walking-bit(送出できることの確認。出力の実値はカセット/治具が無いと未検証)
-  for (int b = 0; b < 32; b++) srWrite32(1UL << b);
-  srWrite32(SR_PPU_A13_N);
-  Serial.printf("SHIFT walking-bit x32 %s\n", "DONE");
-
-  // 3) データバス フロート読み(参考: 全ビット同一なら要注意という程度)
+// データバス(MD0-7)のフロート読み(参考値)
+static uint8_t readMdFloat() {
   digitalWrite(PIN_OE_PRG, LOW);
   delayMicroseconds(2);
   uint8_t v = readDataBus();
   digitalWrite(PIN_OE_PRG, HIGH);
-  Serial.printf("MD float read = 0x%02X\n", v);
+  return v;
+}
 
+static void handleSelfTest() {
+  bool pass = selfCheckPins(true);
+  for (int b = 0; b < 32; b++) srWrite32(1UL << b);  // シフトレジスタ walking-bit 送出確認
+  srWrite32(SR_PPU_A13_N);
+  Serial.printf("SHIFT walking-bit x32 %s\n", "DONE");
+  Serial.printf("MD float read = 0x%02X\n", readMdFloat());
   Serial.printf("SELFTEST %s\n", pass ? "PASS" : "FAIL");
+  if (pass) ledReady(); else ledError();  // 合格=緑 / 不合格=赤点滅
+}
+
+// 機械可読の1行ステータス(Web UI/CLIがパースしやすい形):
+//   STATUS <ver> mirror=<H|V|?> pins=<PASS|FAIL> md=0x<hex>
+static void handleStatus() {
+  bool pins = selfCheckPins(false);
+  char m = detectMirroring();
+  uint8_t md = readMdFloat();
+  Serial.printf("STATUS famidump-v0.2 mirror=%c pins=%s md=0x%02X\n",
+                m, pins ? "PASS" : "FAIL", md);
 }
 
 static void handleRead(bool chr, uint32_t addr, uint32_t len) {
+  ledBusy();  // 青: 読み出し中
   Serial.printf("OK %lX\n", (unsigned long)len);
   uint8_t buf[256];
   uint32_t crc = 0xFFFFFFFF;
@@ -204,6 +232,7 @@ static void handleRead(bool chr, uint32_t addr, uint32_t len) {
     len -= n;
   }
   Serial.printf("CRC %08lX\n", (unsigned long)(crc ^ 0xFFFFFFFF));
+  ledReady();  // 緑: 完了
 }
 
 void loop() {
@@ -224,7 +253,8 @@ void loop() {
       case 'C': handleRead(true, addr, len); break;
       case 'M': Serial.printf("%c\n", detectMirroring()); break;
       case 'T': handleSelfTest(); break;
-      default:  Serial.print("ERR\n"); break;
+      case 'S': handleStatus(); break;
+      default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
   }
 }
