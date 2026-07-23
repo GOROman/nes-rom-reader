@@ -179,6 +179,24 @@
   </div>
 
   <div class="card">
+    <h2 data-i18n="cSaveTitle"></h2>
+    <p style="font-size:.8rem; opacity:.8; margin:.2em 0" data-i18n="saveHint"></p>
+    <div class="row">
+      <label><span data-i18n="saveSizeLabel"></span>
+        <select id="saveSize" style="width:auto">
+          <option value="8" selected>8KB</option>
+          <option value="16">16KB</option>
+          <option value="32">32KB</option>
+        </select>
+      </label>
+      <button id="btnSaveRead" disabled data-i18n="saveRead"></button>
+    </div>
+    <div id="saveResult" class="grid" style="margin-top:12px; display:none">
+      <div>SAVE-CRC:</div><div id="resSaveCrc" class="status" style="font-size:1.05rem">-</div>
+    </div>
+  </div>
+
+  <div class="card">
     <h2 data-i18n="cViewerTitle"></h2>
     <div class="row">
       <label><span data-i18n="loadFileLabel"></span> <input type="file" id="chrFile" accept=".nes,.chr,.bin" style="width:auto"></label>
@@ -307,7 +325,7 @@ pio run -t upload</pre>
 // ---- i18n ----
 const STRINGS = {
   en: {
-    sub: "Family Computer Cartridge Reader — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.3",
+    sub: "Family Computer Cartridge Reader — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.4",
     c1title: "1. Connect", connect: "🔌 Connect Device", disconnect: "Disconnect",
     statusLabel: "Status:", fwLabel: "Firmware:", mirrorLabel: "Mirroring:",
     connected: "Connected", disconnected: "Disconnected",
@@ -325,6 +343,14 @@ const STRINGS = {
     bankNotFound: b => "Bank " + b + ": no matching byte in PRG — cannot select this bank",
     bankMode: n => "Reading CHR with bank switching (" + n + " banks)",
     bankNeedFw: "Firmware does not support the B command. Please flash the latest firmware (cd firmware && pio run -t upload)",
+    cSaveTitle: "SAVE DATA (BATTERY BACKUP)",
+    saveHint: "Reads the cartridge's battery-backed RAM at $6000-$7FFF and saves it as a .sav file. Works on carts whose mapper leaves WRAM enabled at power-on; this board cannot drive the data bus, so it cannot turn WRAM on when the mapper has it disabled.",
+    saveSizeLabel: "Save RAM size",
+    saveRead: "READ SAVE DATA",
+    saveStart: (kb) => "Reading save RAM (" + kb + "KB)...",
+    saveDone: (kb, crc) => "Save data read: " + kb + "KB (CRC " + crc + ") -> save.sav",
+    saveEmpty: (b) => "⚠ Save data is all 0x" + b + " — no WRAM on this cart, or the mapper's WRAM enable bit is off.",
+    saveErr: (m) => "Save read failed: " + m,
     bankCrc: (b, crc) => "  bank " + b + " CRC " + crc,
     bankSame: "⚠ All CHR banks returned identical data — bank switching had no effect. The cartridge latch may need different strobe timing, or this game is not a bus-conflict CNROM.",
     prgDead: "PRG read failed (all bytes identical). Reseat the cartridge and clean its contacts, then check /ROMSEL (slot pin 44), the CPU data lines (slot pins 36-43) and U6.",
@@ -390,7 +416,7 @@ const STRINGS = {
     noCrcLine: l => "CRC line not received: " + l,
   },
   ja: {
-    sub: "ファミリーコンピュータ カセット読み出し — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.3",
+    sub: "ファミリーコンピュータ カセット読み出し — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.4",
     c1title: "1. 接続", connect: "🔌 デバイスに接続", disconnect: "切断",
     statusLabel: "状態:", fwLabel: "ファーム:", mirrorLabel: "ミラーリング:",
     connected: "接続中", disconnected: "未接続",
@@ -408,6 +434,14 @@ const STRINGS = {
     bankNotFound: b => "バンク " + b + ": 一致する値がPRG内に見つかりません(切替不可)",
     bankMode: n => "CHRをバンク切替で読み出します(" + n + "バンク)",
     bankNeedFw: "ファームウェアが B コマンド未対応です。最新ファームを書き込んでください(cd firmware && pio run -t upload)",
+    cSaveTitle: "セーブデータ(バッテリバックアップ)",
+    saveHint: "カセットのバッテリバックアップRAM($6000-$7FFF)を読み出して .sav として保存します。電源投入時にWRAMが有効なマッパーで動作します。本基板はデータバスを駆動できないため、WRAMが無効なマッパーでは有効化できません。",
+    saveSizeLabel: "セーブRAMサイズ",
+    saveRead: "セーブデータ読み出し",
+    saveStart: (kb) => "セーブRAM(" + kb + "KB)を読み出し中...",
+    saveDone: (kb, crc) => "セーブデータ読み出し完了: " + kb + "KB (CRC " + crc + ") -> save.sav",
+    saveEmpty: (b) => "⚠ セーブデータが全バイト 0x" + b + " です。WRAM非搭載か、マッパーのWRAM有効化ビットがOFFの可能性があります",
+    saveErr: (m) => "セーブ読み出し失敗: " + m,
     bankCrc: (b, crc) => "  バンク" + b + " CRC " + crc,
     bankSame: "⚠ 全バンクのCHRが同一内容です。バンク切替が効いていません(ラッチのストローブタイミング不一致、またはバスコンフリクト方式のCNROMではない可能性)",
     prgDead: "PRG が読めていません(全バイト同一)。カセットを挿し直して端子を清掃し、/ROMSEL(スロット44番)・CPUデータ線(スロット36-43番)・U6 の配線を確認してください",
@@ -571,7 +605,7 @@ async function send(str) { await writer.write(new TextEncoder().encode(str)); }
 
 // このWeb UIが必要とするファームウェアの最低バージョン。
 // 新しいコマンド(B: バンク切替 など)を追加したら上げること。
-const REQUIRED_FW = '0.3';
+const REQUIRED_FW = '0.4';
 
 // "famidump v0.2" / "STATUS famidump-v0.3 ..." からバージョン部分を取り出す
 function parseFwVersion(s) {
@@ -618,7 +652,7 @@ async function connect() {
     document.getElementById('connBadge').textContent = t('connected');
     document.getElementById('connBadge').className = 'badge on';
     setConn(true);
-    for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus']) document.getElementById(id).disabled = false;
+    for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus', 'btnSaveRead']) document.getElementById(id).disabled = false;
     document.getElementById('btnConnect').disabled = true;
     document.getElementById('btnDisconnect').disabled = false;
     log(t('connMsg', ver, m), 'log-ok');
@@ -674,7 +708,7 @@ async function disconnect() {
   document.getElementById('devInfo').style.display = 'none';
   document.getElementById('statusDetail').style.display = 'none';
   setStatus('offline');
-  for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus']) document.getElementById(id).disabled = true;
+  for (const id of ['btnDump', 'btnFactory', 'btnSelfTest', 'btnStatus', 'btnSaveRead']) document.getElementById(id).disabled = true;
   document.getElementById('btnConnect').disabled = false;
   document.getElementById('btnDisconnect').disabled = true;
   log(t('disconnected2'), 'log-info');
@@ -738,6 +772,33 @@ async function dumpChrBanked(prg, chrKb, onProgress) {
   // Dump自体は成功扱いになってしまうので明示的に警告する。
   if (banks > 1 && new Set(crcs).size === 1) log(t('bankSame'), 'log-ng');
   return { data: out, crc: crc32(out) };
+}
+
+// --- バッテリバックアップRAM($6000-$7FFF)の吸い出し ---
+// /ROMSEL は非アクティブのまま M2 をトグルして読む(ファーム側の W コマンド)。
+// マッパーのWRAM有効化ビットがOFFの個体では全バイト同一の値しか返らない。
+async function doSaveRead() {
+  const btn = document.getElementById('btnSaveRead');
+  btn.disabled = true;
+  try {
+    const kb = parseInt(document.getElementById('saveSize').value, 10);
+    log(t('saveStart', kb), 'log-info');
+    setStatus('busy');
+    const sav = await dumpRegion('W', 0x6000, kb * 1024);
+    const crc = hex8(sav.crc);
+    document.getElementById('resSaveCrc').textContent = crc;
+    document.getElementById('saveResult').style.display = 'grid';
+    if (new Set(sav.data).size === 1) {
+      log(t('saveEmpty', sav.data[0].toString(16).padStart(2, '0').toUpperCase()), 'log-ng');
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([sav.data], { type: 'application/octet-stream' }));
+    a.download = 'save.sav'; a.click();
+    log(t('saveDone', kb, crc), 'log-ok');
+    setStatus('ready');
+  } catch (e) {
+    log(t('saveErr', e.message), 'log-ng'); setStatus('error');
+  } finally { btn.disabled = false; }
 }
 
 function inesHeader(prgKb, chrKb, mapper, vertical) {
@@ -1226,6 +1287,7 @@ document.getElementById('fwDlgClose').onclick = () => { document.getElementById(
 document.getElementById('btnConnect').onclick = connect;
 document.getElementById('btnDisconnect').onclick = disconnect;
 document.getElementById('btnDump').onclick = doDump;
+document.getElementById('btnSaveRead').onclick = doSaveRead;
 document.getElementById('btnSelfTest').onclick = doSelfTest;
 document.getElementById('btnFactory').onclick = doFactoryTest;
 document.getElementById('btnStatus').onclick = checkStatus;

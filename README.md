@@ -132,18 +132,31 @@ The same flow runs from the Web UI's **Factory Test** panel, which paces each st
 the status LED. The self-test reads back every output pin, exercises the shift registers, and reports
 `SELFTEST PASS/FAIL`.
 
+### Battery-backed save data
+
+Cartridges with a save battery (Fire Emblem, Zelda, Wizardry, …) keep their save in
+WRAM at `$6000-$7FFF`. The **SAVE DATA** card in the Web UI (or `--save-out game.sav`
+in the CLI) reads it out and writes a `.sav` file.
+
+This works on cartridges whose mapper leaves WRAM enabled at power-on. Because this
+board is read-only and cannot drive the data bus, it cannot write the mapper register
+that enables WRAM (MMC1 bit 4 of the PRG register, MMC3 `$A001`). On a cart where that
+bit powers up disabled, the read returns all-identical bytes and the tool says so.
+Writing save data *back* to a cartridge is not supported.
+
 ## Serial protocol
 
 USB CDC, 115200 baud. One-line commands:
 
 | Command | Response |
 |---|---|
-| `V` | `famidump v0.3` |
+| `V` | `famidump v0.4` |
 | `R <addr_hex> <len_hex>` | `OK <len>` + raw bytes + `CRC xxxxxxxx` (PRG) |
 | `C <addr_hex> <len_hex>` | same, for CHR |
 | `M` | `H` / `V` / `?` — mirroring |
 | `T` | Paced self-test, ends with `SELFTEST PASS/FAIL` |
-| `S` | `STATUS famidump-v0.3 mirror=? pins=PASS md=0x20` |
+| `S` | `STATUS famidump-v0.4 mirror=? pins=PASS md=0x20` |
+| `W <addr_hex> <len_hex>` | Read battery-backed WRAM at `$6000-$7FFF` (same framing as `R`/`C`) |
 | `B <addr_hex>` | Dummy write cycle at `addr` for CNROM bank select → `BANK xxxx` |
 
 CRC is CRC32 (IEEE 802.3 / `zlib.crc32`-compatible), 8 uppercase hex digits.
