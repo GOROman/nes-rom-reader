@@ -1,7 +1,7 @@
 // nes-rom-reader firmware (M5Stamp S3)
 //
 // ホストとはUSB CDCで通信。プロトコル(1行コマンド、応答はバイナリ):
-//   V                      -> "famidump v0.4\n"
+//   V                      -> "famidump v0.5 rev<基板リビジョン>\n"
 //   R <addr_hex> <len_hex> -> PRG読み出し。"OK <len>\n" + 生データ + "CRC xxxxxxxx\n"
 //   C <addr_hex> <len_hex> -> CHR読み出し。同上
 //   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
@@ -9,6 +9,9 @@
 //                             "SELFTEST PASS\n" または "SELFTEST FAIL\n"
 //   W <addr_hex> <len_hex> -> バッテリバックアップRAM($6000-$7FFF)読み出し。
 //                             応答形式は R/C と同じ。
+//   P <addr_hex> <data_hex> -> CPU空間へ1バイト書き込み(マッパーレジスタ/WRAM)。
+//                             "WROK <addr> <data>\n" を返す。基板v0.2以降のみ。
+//                             v0.1基板では "ERR NEEDS_REV2\n"。
 //   B <addr_hex>           -> バンク選択(CNROM等)。指定アドレスへダミーライト
 //                             サイクルを発生させ "BANK xxxx\n" を返す。
 //                             バスコンフリクトを利用するため、addr には
@@ -35,6 +38,13 @@ static const int PIN_PPU_RD   = 2;   // PPU /RD 負論理
 static const int PIN_PPU_WR   = 3;   // PPU /WR 負論理
 static const int PIN_CIRAM_A10 = 46; // 入力 (10k/20k分圧で5V→3.3V)
 static const int PIN_LED       = 21; // M5Stamp S3 内蔵 WS2812 RGB LED
+static const int PIN_BUS_DIR   = 40; // 基板v0.2: 74LVC8T245 DIR (H=A→B 書き込み)
+
+// 基板リビジョン。v0.1 はデータバッファが読み出し方向固定なので、
+// 書き込み系(P コマンド)は BOARD_REV>=2 でのみ有効。platformio.ini で上書きする。
+#ifndef BOARD_REV
+#define BOARD_REV 1
+#endif
 
 // --- ステータスLED (内蔵WS2812) ---
 // 緑=待機/正常、青=読み出し中、赤点滅=エラー。明るさは控えめ。
@@ -145,6 +155,52 @@ static void bankSelectWrite(uint16_t addr) {
   busIdle();
 }
 
+// --- 実バス書き込み (基板 v0.2 以降のみ) ---
+//
+// v0.1 のデータバッファ(74LVC245)は方向がB→A固定なので、MCU側から出力すると
+// バッファの出力と衝突してショートする。よって BOARD_REV>=2 でのみ有効化する。
+// v0.2 は 74LVC8T245 + BUS_DIR(G40) でカートリッジ側を駆動できる。
+#if BOARD_REV >= 2
+static void driveDataBus(uint8_t v) {
+  for (int i = 0; i < 8; i++) {
+    pinMode(PIN_D[i], OUTPUT);
+    digitalWrite(PIN_D[i], (v >> i) & 1);
+  }
+}
+static void releaseDataBus() {
+  for (int i = 0; i < 8; i++) pinMode(PIN_D[i], INPUT);
+}
+
+// CPU空間へ1バイト書き込む。マッパーレジスタ($8000-$FFFF)とWRAM($6000-$7FFF)の両方に対応。
+static void writeCpu(uint16_t addr, uint8_t data) {
+  bool rom = addr >= 0x8000;   // $8000以上は /ROMSEL でデコードされる
+  srWrite32(srCpuAddr(addr));
+  digitalWrite(PIN_OE_PRG, HIGH);   // バッファを一旦切ってから方向を変える
+  digitalWrite(PIN_BUS_DIR, HIGH);  // A→B: MCUがカートリッジを駆動
+  driveDataBus(data);
+  digitalWrite(PIN_OE_PRG, LOW);    // バッファON。ここでカート側にデータが出る
+  delayMicroseconds(2);
+
+  digitalWrite(PIN_RW, LOW);        // 書き込みサイクル
+  delayMicroseconds(1);
+  if (rom) digitalWrite(PIN_ROMSEL, LOW);
+  digitalWrite(PIN_M2, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_M2, HIGH);       // M2 High がCPUアクセス位相
+  delayMicroseconds(3);
+  digitalWrite(PIN_M2, LOW);        // 立ち下がりでラッチする実装が多い
+  delayMicroseconds(1);
+  if (rom) digitalWrite(PIN_ROMSEL, HIGH);
+  digitalWrite(PIN_RW, HIGH);
+  delayMicroseconds(1);
+
+  digitalWrite(PIN_OE_PRG, HIGH);   // バッファOFF → 方向を読み出しへ戻す
+  releaseDataBus();
+  digitalWrite(PIN_BUS_DIR, LOW);
+  busIdle();
+}
+#endif  // BOARD_REV >= 2
+
 // バッテリバックアップRAM(WRAM/SRAM)読み出し。addrは$6000-$7FFF。
 //
 // この領域は /ROMSEL が非アクティブ(High)のまま、カートリッジ側が
@@ -215,6 +271,10 @@ void setup() {
   pinMode(PIN_PPU_RD, OUTPUT);
   pinMode(PIN_PPU_WR, OUTPUT);
   pinMode(PIN_CIRAM_A10, INPUT);
+#if BOARD_REV >= 2
+  pinMode(PIN_BUS_DIR, OUTPUT);
+  digitalWrite(PIN_BUS_DIR, LOW);  // 既定は B→A(読み出し)
+#endif
   busIdle();
   srWrite32(SR_PPU_A13_N);  // アイドル時も PPU /A13=1 (PPU A13=0)
   Serial.begin(115200);
@@ -301,7 +361,7 @@ static void handleStatus() {
   bool pins = selfCheckPins(false);
   char m = detectMirroring();
   uint8_t md = readMdFloat();
-  Serial.printf("STATUS famidump-v0.4 mirror=%c pins=%s md=0x%02X\n",
+  Serial.printf("STATUS famidump-v0.5 mirror=%c pins=%s md=0x%02X\n",
                 m, pins ? "PASS" : "FAIL", md);
 }
 
@@ -339,7 +399,7 @@ void loop() {
     sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
     line = "";
     switch (cmd) {
-      case 'V': Serial.print("famidump v0.4\n"); break;
+      case 'V': Serial.printf("famidump v0.5 rev%d\n", BOARD_REV); break;
       case 'R': handleRead('R', addr, len); break;
       case 'C': handleRead('C', addr, len); break;
       case 'W': handleRead('W', addr, len); break;
@@ -347,6 +407,14 @@ void loop() {
       case 'T': handleSelfTest(); break;
       case 'S': handleStatus(); break;
       case 'B': bankSelectWrite((uint16_t)addr); Serial.printf("BANK %04X\n", (unsigned)(addr & 0xFFFF)); break;
+#if BOARD_REV >= 2
+      case 'P':
+        writeCpu((uint16_t)addr, (uint8_t)len);
+        Serial.printf("WROK %04X %02X\n", (unsigned)(addr & 0xFFFF), (unsigned)(len & 0xFF));
+        break;
+#else
+      case 'P': Serial.print("ERR NEEDS_REV2\n"); break;
+#endif
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
   }
