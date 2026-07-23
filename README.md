@@ -138,12 +138,12 @@ USB CDC, 115200 baud. One-line commands:
 
 | Command | Response |
 |---|---|
-| `V` | `famidump v0.2` |
+| `V` | `famidump v0.3` |
 | `R <addr_hex> <len_hex>` | `OK <len>` + raw bytes + `CRC xxxxxxxx` (PRG) |
 | `C <addr_hex> <len_hex>` | same, for CHR |
 | `M` | `H` / `V` / `?` — mirroring |
 | `T` | Paced self-test, ends with `SELFTEST PASS/FAIL` |
-| `S` | `STATUS famidump-v0.2 mirror=? pins=PASS md=0x20` |
+| `S` | `STATUS famidump-v0.3 mirror=? pins=PASS md=0x20` |
 | `B <addr_hex>` | Dummy write cycle at `addr` for CNROM bank select → `BANK xxxx` |
 
 CRC is CRC32 (IEEE 802.3 / `zlib.crc32`-compatible), 8 uppercase hex digits.
@@ -153,6 +153,14 @@ CRC is CRC32 (IEEE 802.3 / `zlib.crc32`-compatible), 8 uppercase hex digits.
 - Repository: https://github.com/GOROman/nes-rom-reader
 - Web UI (live): https://goroman.github.io/nes-rom-reader/web/
 - Author on X: [@GOROman](https://x.com/GOROman)
+
+## License
+
+**NULL License** — see [LICENSE](LICENSE).
+
+Free to use, modify and redistribute for non-commercial purposes; all rights remain with
+**GOROman**. For commercial use or selling hardware based on this design, please get in
+touch first: [@GOROman](https://x.com/GOROman). Provided as is, with no warranty.
 
 ## Credits
 

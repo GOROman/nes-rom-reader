@@ -138,12 +138,12 @@ USB CDC,115200 波特率。单行命令:
 
 | 命令 | 响应 |
 |---|---|
-| `V` | `famidump v0.2` |
+| `V` | `famidump v0.3` |
 | `R <addr_hex> <len_hex>` | `OK <len>` + 原始数据 + `CRC xxxxxxxx`(PRG) |
 | `C <addr_hex> <len_hex>` | 同上(CHR) |
 | `M` | `H` / `V` / `?` — 镜像方式 |
 | `T` | 带节奏的自检,最后输出 `SELFTEST PASS/FAIL` |
-| `S` | `STATUS famidump-v0.2 mirror=? pins=PASS md=0x20` |
+| `S` | `STATUS famidump-v0.3 mirror=? pins=PASS md=0x20` |
 | `B <addr_hex>` | CNROM 换库用的空写周期 → `BANK xxxx` |
 
 CRC 为 CRC32(IEEE 802.3 / 兼容 `zlib.crc32`),8 位大写十六进制。
@@ -153,6 +153,14 @@ CRC 为 CRC32(IEEE 802.3 / 兼容 `zlib.crc32`),8 位大写十六进制。
 - 仓库:https://github.com/GOROman/nes-rom-reader
 - Web UI(在线版):https://goroman.github.io/nes-rom-reader/web/
 - 作者 X:[@GOROman](https://x.com/GOROman)
+
+## 许可证
+
+**NULL License** — 参见 [LICENSE](LICENSE)。
+
+非商业用途可自由使用、修改和再分发,但所有权利归 **GOROman** 所有。
+如需销售或用于商业用途,请事先联系: [@GOROman](https://x.com/GOROman)。
+本项目按“原样”提供,不作任何担保。
 
 ## 致谢
 
