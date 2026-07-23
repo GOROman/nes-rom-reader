@@ -214,6 +214,28 @@
         <button id="btnDlNes" data-i18n="dlNes"></button>
       </div>
       <p style="font-size:.75rem; opacity:.7; margin:.4em 0" data-i18n="editHint"></p>
+
+      <hr style="border:none; border-top:3px solid var(--maroon); margin:14px 0">
+      <h3 style="margin:0 0 8px; font-size:.9rem; color:var(--maroon)" data-i18n="textToolTitle"></h3>
+      <p style="font-size:.75rem; opacity:.75; margin:.2em 0" data-i18n="textToolHint"></p>
+      <div class="row" style="margin-top:6px">
+        <label><span data-i18n="fontStartLabel"></span> <input type="number" id="fontStart" value="0" min="0" style="width:90px"></label>
+        <label style="flex:1 1 260px"><span data-i18n="fontCharsLabel"></span>
+          <input type="text" id="fontChars" placeholder="あいうえお… / 0123456789ABC…" style="width:100%; max-width:420px"></label>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label><span data-i18n="destStartLabel"></span> <input type="number" id="destStart" value="0" min="0" style="width:90px"></label>
+        <label><span data-i18n="wrapLabel"></span> <input type="number" id="destWrap" value="16" min="1" style="width:90px"></label>
+        <label><input type="checkbox" id="blankUnknown" checked style="width:auto"> <span data-i18n="blankUnknownLabel"></span></label>
+      </div>
+      <div style="margin-top:6px">
+        <textarea id="msgText" rows="3" placeholder="エンジニアこんどう よしひと。"
+          style="width:100%; background:var(--white); color:var(--ink); border:3px solid var(--maroon);
+                 border-radius:2px; padding:8px; font-family:'DotGothic16',monospace"></textarea>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnStamp" data-i18n="stampBtn"></button>
+      </div>
     </div>
   </div>
 
@@ -300,6 +322,15 @@ const STRINGS = {
     pxTitle: n => "PIXEL EDITOR — TILE #" + n,
     pxDone: n => "Tile #" + n + " updated in the pixel editor",
     dblHint: "💡 Double-click a tile to open the 8×8 pixel editor.",
+    textToolTitle: "✍ Write text with the cartridge font",
+    textToolHint: "The message tiles in CHR are just font glyphs placed in order. Tell the tool where the font starts and the character order of the glyphs, then type your text — it copies the matching glyph tiles into the destination. Hover a tile to see its number.",
+    fontStartLabel: "Font start tile #", fontCharsLabel: "Glyph order (characters in tile order):",
+    destStartLabel: "Write to tile #", wrapLabel: "Tiles per line",
+    blankUnknownLabel: "Blank unknown chars",
+    stampBtn: "✍ Write text into CHR",
+    stampDone: (n, s) => "Wrote " + n + " tiles from #" + s,
+    stampNeedFont: "Enter the glyph order (font character list) first",
+    hoverTile: n => "Tile #" + n,
     c3title: "3. Factory Test",
     testDesc: "Insert a reference cartridge (known CRC) and run. If the dumped CRC matches, result is PASS. For post-assembly 100% inspection.",
     goldPrgLabel: "Ref PRG-CRC", goldChrLabel: "Ref CHR-CRC (opt)",
@@ -360,6 +391,15 @@ const STRINGS = {
     pxTitle: n => "ドット絵エディタ — タイル #" + n,
     pxDone: n => "タイル #" + n + " をドット絵エディタで更新しました",
     dblHint: "💡 タイルをダブルクリックすると 8×8 ドット絵エディタが開きます。",
+    textToolTitle: "✍ カセットのフォントでテキストを書き込む",
+    textToolHint: "CHR内のメッセージは、フォント字形タイルを並べただけのものです。フォントの開始タイル番号と字形の並び順(文字列)を指定し、本文を入力すると、対応する字形タイルを書込み先へコピーします。タイルにマウスを載せると番号が表示されます。",
+    fontStartLabel: "フォント開始タイル #", fontCharsLabel: "字形の並び順(タイル順の文字):",
+    destStartLabel: "書込み先タイル #", wrapLabel: "1行のタイル数",
+    blankUnknownLabel: "未知の文字は空白にする",
+    stampBtn: "✍ CHRにテキストを書き込む",
+    stampDone: (n, s) => "#" + s + " から " + n + " タイル書き込みました",
+    stampNeedFont: "先に「字形の並び順」(フォントの文字一覧)を入力してください",
+    hoverTile: n => "タイル #" + n,
     c3title: "3. 出荷テスト",
     testDesc: "基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば PASS。組み立て後の全数検査用です。",
     goldPrgLabel: "基準PRG-CRC", goldChrLabel: "基準CHR-CRC(任意)",
@@ -872,6 +912,39 @@ function pxPaint(e) {
   pxBuf[y * 8 + x] = pxColor;
   renderPx();
 }
+// フォント字形タイルを並べてテキストをCHRへ書き込む
+function stampText() {
+  if (!chrData) { log(t('noChr'), 'log-ng'); return; }
+  const fontStart = +document.getElementById('fontStart').value;
+  const fontChars = document.getElementById('fontChars').value;
+  const destStart = +document.getElementById('destStart').value;
+  const wrap = Math.max(1, +document.getElementById('destWrap').value);
+  const blankUnknown = document.getElementById('blankUnknown').checked;
+  const msg = document.getElementById('msgText').value;
+  if (!fontChars) { log(t('stampNeedFont'), 'log-ng'); return; }
+  const nTiles = Math.floor(chrData.length / 16);
+  let written = 0;
+  const lines = msg.split('\n');
+  for (let li = 0; li < lines.length; li++) {
+    let dst = destStart + li * wrap;
+    for (const ch of lines[li]) {
+      if (dst < 0 || dst >= nTiles) break;
+      const si = fontChars.indexOf(ch);
+      const db = dst * 16;
+      if (si >= 0) {
+        const sb = (fontStart + si) * 16;
+        if (sb + 16 <= chrData.length) { for (let i = 0; i < 16; i++) chrData[db + i] = chrData[sb + i]; written++; }
+      } else if (blankUnknown) {
+        for (let i = 0; i < 16; i++) chrData[db + i] = 0;  // 未知文字は空白タイル
+        written++;
+      }
+      dst++;
+    }
+  }
+  renderChr();
+  log(t('stampDone', written, destStart), 'log-ok');
+}
+
 function openPixelEditor(idx) {
   if (!chrData || idx < 0) return;
   pxTile = idx;
@@ -998,7 +1071,14 @@ function initViewer() {
   const cv = document.getElementById('chrCanvas');
   cv.addEventListener('click', onCanvasClick);
   // ダブルクリックでドット絵エディタ起動(編集モード不要)
-  cv.addEventListener('dblclick', e => { const i = tileFromEvent(e); if (i >= 0) openPixelEditor(i); });
+  cv.addEventListener('dblclick', e => { e.preventDefault(); const i = tileFromEvent(e); if (i >= 0) openPixelEditor(i); });
+  // ホバーでタイル番号表示(フォント位置探し用)
+  cv.addEventListener('mousemove', e => {
+    const i = tileFromEvent(e);
+    if (i >= 0) document.getElementById('viewerInfo').textContent = t('hoverTile', i);
+  });
+  cv.addEventListener('mouseleave', () => { if (chrData) renderChr(); });
+  document.getElementById('btnStamp').onclick = stampText;
   // ドット絵エディタの操作
   const pxc = document.getElementById('pxCanvas');
   pxc.addEventListener('pointerdown', e => { pxDrawing = true; pxc.setPointerCapture(e.pointerId); pxPaint(e); });
