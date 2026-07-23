@@ -39,6 +39,7 @@ The Stamp footprint (hole layout/size) does not match the real module. **This is
 
 | Tool | Purpose |
 |---|---|
+| **UEW (enamelled copper wire)** | For jumper wiring — solders directly without stripping ([2UEW 0.16 mm](https://akizukidenshi.com/catalog/g/g111531/)) |
 | **Flux cleaner** | Removes residue afterwards — cleaner result, fewer contact problems |
 | Magnifier / loupe | Check bridges and part orientation (a phone camera works too) |
 | PCB holder ("helping hands") | Keeps the board still |
@@ -153,6 +154,11 @@ On the U8 pads, **bridge these pin pairs** with jumper wire (or solder bridges):
 ![U8 jumper wiring](images/assembly/08-u8-jumpers.jpg)
 
 **A real example (photo above).** Eight jumpers running **diagonally and parallel** is what it should look like.
+
+> 💡 **UEW (polyurethane-enamelled copper wire) is the ideal wire** — that's what's used in the photo.
+> The **enamel melts under the iron**, so you can solder it directly without stripping. It's thin,
+> easy to route, and adjacent wires can touch without shorting.
+> Example: [Akizuki 2UEW 0.16 mm, 20 m (¥270)](https://akizukidenshi.com/catalog/g/g111531/)
 
 - The **dot (●) on the U8 outline marks pin 1**. From there the bottom row runs left→right: 1, 2, 3 … 10
 - The top row runs right→left: 11, 12 … 20 (so **left→right along the top it reads 20, 19, 18 … 11**)
