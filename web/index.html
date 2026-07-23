@@ -325,6 +325,7 @@ const STRINGS = {
     bankNotFound: b => "Bank " + b + ": no matching byte in PRG — cannot select this bank",
     bankMode: n => "Reading CHR with bank switching (" + n + " banks)",
     bankNeedFw: "Firmware does not support the B command. Please flash the latest firmware (cd firmware && pio run -t upload)",
+    prgDead: "PRG read failed (all bytes identical). Reseat the cartridge and clean its contacts, then check /ROMSEL (slot pin 44), the CPU data lines (slot pins 36-43) and U6.",
     fwOldTitle: "⚠ FIRMWARE OUT OF DATE",
     fwOldBody: "The connected device runs older firmware. Newer features (CHR bank switching, status command) may not work. Flash the latest firmware from the repository:",
     fwOldClose: "OK, continue anyway",
@@ -405,6 +406,7 @@ const STRINGS = {
     bankNotFound: b => "バンク " + b + ": 一致する値がPRG内に見つかりません(切替不可)",
     bankMode: n => "CHRをバンク切替で読み出します(" + n + "バンク)",
     bankNeedFw: "ファームウェアが B コマンド未対応です。最新ファームを書き込んでください(cd firmware && pio run -t upload)",
+    prgDead: "PRG が読めていません(全バイト同一)。カセットを挿し直して端子を清掃し、/ROMSEL(スロット44番)・CPUデータ線(スロット36-43番)・U6 の配線を確認してください",
     fwOldTitle: "⚠ ファームウェアが古い",
     fwOldBody: "接続されたデバイスのファームウェアが古いバージョンです。新機能(CHRバンク切替・状態取得)が動作しない可能性があります。リポジトリから最新ファームを書き込んでください:",
     fwOldClose: "OK(このまま続ける)",
@@ -755,6 +757,12 @@ async function doDump() {
     setStatus('busy');
     const prg = await dumpRegion('R', 0x8000, prgKb * 1024, p => setProg(p * (chrKb ? 50 : 100), 'PRG...'));
     let chr = { data: new Uint8Array(0) };
+    // PRGが全バイト同一 = 読めていない。バンク切替はPRGの中身に依存するので
+    // ここで止めないと「バンクNが見つからない」という誤解を招くエラーになる。
+    if (new Set(prg.data).size === 1) {
+      log(t('allSame', prg.data[0].toString(16).padStart(2, '0').toUpperCase()), 'log-ng');
+      throw new Error(t('prgDead'));
+    }
     const useBanks = document.getElementById('bankSwitch').checked && chrKb > 8;
     if (chrKb) {
       chr = useBanks
@@ -762,7 +770,6 @@ async function doDump() {
         : await dumpRegion('C', 0x0000, chrKb * 1024, p => setProg(50 + p * 50, 'CHR...'));
     }
     setProg(100, 'DONE');
-    if (new Set(prg.data).size === 1) log(t('allSame', prg.data[0].toString(16)), 'log-ng');
     const header = inesHeader(prgKb, chrKb, mapper, mirror === 'V');
     const out = new Uint8Array(header.length + prg.data.length + chr.data.length);
     out.set(header); out.set(prg.data, header.length); out.set(chr.data, header.length + prg.data.length);
