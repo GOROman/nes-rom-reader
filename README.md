@@ -71,6 +71,14 @@ Use `--bank-switch` on the CLI, or tick **CHR bank switching** in the Web UI.
 > ⚠️ CNROM boards with **copy-protection diodes** create extra bus conflicts that only a dumper actively
 > driving the bus can win — those carts still need a write-capable v0.2 board.
 
+**Why MMC1 / MMC3-class mappers cannot be dumped here**: those mappers do *not* have bus conflicts — the
+PRG-ROM stops driving the bus during a write cycle — so the trick above has nothing to latch. Selecting a
+bank means genuinely driving the data bus, which this read-only board cannot do. You can still read whatever
+32 KB PRG window happens to be mapped at power-on, and the battery-backed save RAM (see above), but not the
+full ROM. The same applies to MMC3-derived unlicensed mappers such as **mapper 165** (*Fire Emblem (Unl)*,
+an MMC2/MMC3 hybrid with an MMC2-style CHR latch and 4 KB CHR-RAM). Full support needs a board revision
+whose data buffer can be switched to drive the cartridge.
+
 ## Getting started
 
 ### 1. Flash the firmware
