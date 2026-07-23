@@ -49,6 +49,11 @@ Open in Chrome / Edge (desktop or Android), connect an M5Stamp S3, and dump.
 Fab it yourself: upload [`hardware/gerber/nes-rom-reader-gerber.zip`](hardware/gerber/) to JLCPCB or similar.
 See [hardware/README.md](hardware/README.md) and [docs/hardware-design.md](docs/hardware-design.md).
 
+📖 **[Assembly guide (step by step, beginner-friendly)](docs/assembly.en.md)** — tools, soldering order, checks and troubleshooting.
+
+> ⚠️ **Known issue in v0.1**: the M5Stamp S3 does not drop into the board — the Stamp footprint does not
+> match the real module. Workaround: raise it on pin headers (documented in the assembly guide). Fixed in v0.2.
+
 ## Supported cartridges & limitations
 
 - ✅ **Mapper 0 (NROM)** — fully supported (PRG 32 KB + CHR 8 KB), verified on hardware

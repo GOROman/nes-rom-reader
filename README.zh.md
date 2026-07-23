@@ -50,6 +50,11 @@
 自行打样:把 [`hardware/gerber/nes-rom-reader-gerber.zip`](hardware/gerber/) 上传到 JLCPCB 等即可。
 详见 [hardware/README.md](hardware/README.md) 与 [docs/hardware-design.md](docs/hardware-design.md)。
 
+📖 **[组装指南(面向新手,分步说明)](docs/assembly.en.md)** — 所需工具、焊接顺序、检查方法与故障排查。
+
+> ⚠️ **v0.1 已知问题**:M5Stamp S3 无法直接插入本板(Stamp 焊盘布局与实物不符)。
+> 变通方法是用排针垫高后接线(组装指南中有说明)。将在 v0.2 修复。
+
 ## 支持的卡带与限制
 
 - ✅ **mapper 0 (NROM)** — 完全支持(PRG 32KB + CHR 8KB),已在实机验证
