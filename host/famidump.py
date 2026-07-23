@@ -14,6 +14,7 @@ iNESヘッダ付き .nes ファイルを出力する。
 import argparse
 import sys
 import zlib
+from typing import Optional
 
 import serial
 
@@ -48,6 +49,45 @@ def dump(ser: serial.Serial, cmd: str, addr: int, length: int) -> bytes:
     return data
 
 
+def find_bank_addr(prg: bytes, bank: int) -> Optional[int]:
+    """PRG内で値が bank と一致するアドレスを探す(バスコンフリクト方式のバンク選択用)。
+
+    CNROM等では書き込みサイクル中もPRG-ROMが出力を続けるため、
+    「選びたいバンク番号と同じ値が入っているアドレス」へ書き込むと、
+    ROM自身がその値をデータバスに出し、カートリッジのラッチが取り込む。
+    """
+    idx = prg.find(bytes([bank]))
+    return 0x8000 + idx if idx >= 0 else None
+
+
+def select_bank(ser, prg: bytes, bank: int) -> bool:
+    """CHRバンクを切り替える。成功したらTrue。"""
+    addr = find_bank_addr(prg, bank)
+    if addr is None:
+        print(f"警告: バンク{bank} に対応する値がPRG内に見つかりません(切替不可)",
+              file=sys.stderr)
+        return False
+    ser.write(f"B {addr:X}\n".encode())
+    resp = ser.readline().decode(errors="replace").strip()
+    if not resp.startswith("BANK"):
+        print(f"警告: バンク切替の応答が不正: {resp!r}", file=sys.stderr)
+        return False
+    print(f"  バンク{bank} 選択 (PRG ${addr:04X} 経由)", file=sys.stderr)
+    return True
+
+
+def dump_chr_banked(ser, prg: bytes, chr_kb: int) -> bytes:
+    """CNROM等: 8KBずつバンクを切り替えながらCHR全体を読む。"""
+    banks = chr_kb // 8
+    out = bytearray()
+    for b in range(banks):
+        if not select_bank(ser, prg, b):
+            print(f"エラー: バンク{b} を選択できませんでした", file=sys.stderr)
+            sys.exit(1)
+        out += dump(ser, "C", 0x0000, 8 * 1024)
+    return bytes(out)
+
+
 def ines_header(prg_kb: int, chr_kb: int, mapper: int, vertical: bool) -> bytes:
     flags6 = ((mapper & 0x0F) << 4) | (1 if vertical else 0)
     flags7 = mapper & 0xF0
@@ -70,9 +110,10 @@ def sanity_check(args) -> None:
         if args.chr_kb > 8:
             print(f"警告: mapper 0 (NROM) のCHRは最大8KBです (--chr {args.chr_kb})",
                   file=sys.stderr)
-    else:
-        print(f"警告: 現行ファームウェアはバンク切替未対応です。mapper {args.mapper} "
-              "では先頭バンクの内容しか読めない可能性があります", file=sys.stderr)
+    elif args.chr_kb > 8 and not args.bank_switch:
+        print(f"警告: mapper {args.mapper} でCHR {args.chr_kb}KB を指定していますが "
+              "--bank-switch がありません。先頭バンクしか読めない可能性があります。"
+              "CNROM(mapper 3)等は --bank-switch を付けてください", file=sys.stderr)
     if args.chr_kb == 0:
         print("情報: --chr 0 → CHR-RAM搭載カセットとして扱います(CHRは吸い出しません)",
               file=sys.stderr)
@@ -85,6 +126,8 @@ def main() -> None:
     p.add_argument("--chr", type=int, default=8, dest="chr_kb",
                    help="CHRサイズ KB (default: 8)")
     p.add_argument("--mapper", type=int, default=0, help="iNESマッパー番号 (default: 0)")
+    p.add_argument("--bank-switch", action="store_true",
+                   help="CHRをバンク切替で吸い出す(CNROM/mapper3等。CHR>8KB時に有効)")
     p.add_argument("-o", "--output", required=True, help="出力 .nes ファイル")
     args = p.parse_args()
 
@@ -106,7 +149,15 @@ def main() -> None:
                   "iNESヘッダは水平ミラーとして書き出します", file=sys.stderr)
 
         prg = dump(ser, "R", 0x8000, args.prg * 1024)
-        chr_data = dump(ser, "C", 0x0000, args.chr_kb * 1024) if args.chr_kb else b""
+        if not args.chr_kb:
+            chr_data = b""
+        elif args.chr_kb > 8 and args.bank_switch:
+            # CNROM等: バンクを切り替えながら8KBずつ読む
+            print(f"CHR {args.chr_kb}KB をバンク切替で吸い出します"
+                  f"({args.chr_kb // 8}バンク)", file=sys.stderr)
+            chr_data = dump_chr_banked(ser, prg, args.chr_kb)
+        else:
+            chr_data = dump(ser, "C", 0x0000, args.chr_kb * 1024)
 
     if len(set(prg)) == 1:
         print(f"警告: PRGデータが全バイト同一 (0x{prg[0]:02X})。"

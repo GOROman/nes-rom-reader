@@ -57,15 +57,19 @@ See [hardware/README.md](hardware/README.md) and [docs/hardware-design.md](docs/
 ## Supported cartridges & limitations
 
 - ✅ **Mapper 0 (NROM)** — fully supported (PRG 32 KB + CHR 8 KB), verified on hardware
-- ⚠️ **Bank-switched mappers (CNROM / UNROM / MMC1 …) are not supported yet**
+- 🧪 **CNROM (mapper 3)** — CHR bank switching implemented via the **bus-conflict** technique (experimental)
+- ⚠️ **UNROM / MMC1 and others** — not implemented yet
 
-**Why**: bank switching requires *writing* to a mapper register, but the data buffers (74LVC245) are
-**fixed-direction, read-only** (cartridge → ESP32). Without write capability, banks cannot be selected.
+**How CNROM works here**: the board's data buffers (74LVC245) are fixed-direction/read-only, so we cannot
+drive the data bus. But on CNROM the **PRG-ROM keeps driving the bus during a write** (AND-type
+[bus conflict](https://www.nesdev.org/wiki/Bus_conflict)) — the same reason games write bank numbers to a ROM
+address that already holds that value. So the tool dumps PRG first, finds an address whose byte equals the
+desired bank, issues a dummy write cycle there, and the cartridge latch captures it.
 
-> Example — *Transformers: Convoy no Nazo* (CNROM / mapper 3): its 32 KB PRG dumps fine, but only the
-> power-on CHR bank (8 KB) is readable.
+Use `--bank-switch` on the CLI, or tick **CHR bank switching** in the Web UI.
 
-Supporting these mappers needs a **v0.2 board with bidirectional (write-capable) buffers** plus bank-switching firmware.
+> ⚠️ CNROM boards with **copy-protection diodes** create extra bus conflicts that only a dumper actively
+> driving the bus can win — those carts still need a write-capable v0.2 board.
 
 ## Getting started
 
@@ -140,6 +144,7 @@ USB CDC, 115200 baud. One-line commands:
 | `M` | `H` / `V` / `?` — mirroring |
 | `T` | Paced self-test, ends with `SELFTEST PASS/FAIL` |
 | `S` | `STATUS famidump-v0.2 mirror=? pins=PASS md=0x20` |
+| `B <addr_hex>` | Dummy write cycle at `addr` for CNROM bank select → `BANK xxxx` |
 
 CRC is CRC32 (IEEE 802.3 / `zlib.crc32`-compatible), 8 uppercase hex digits.
 
