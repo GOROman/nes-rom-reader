@@ -1,7 +1,7 @@
 // nes-rom-reader firmware (M5Stamp S3)
 //
 // ホストとはUSB CDCで通信。プロトコル(1行コマンド、応答はバイナリ):
-//   V                      -> "famidump v0.2\n"
+//   V                      -> "famidump v0.3\n"
 //   R <addr_hex> <len_hex> -> PRG読み出し。"OK <len>\n" + 生データ + "CRC xxxxxxxx\n"
 //   C <addr_hex> <len_hex> -> CHR読み出し。同上
 //   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
@@ -278,7 +278,7 @@ static void handleStatus() {
   bool pins = selfCheckPins(false);
   char m = detectMirroring();
   uint8_t md = readMdFloat();
-  Serial.printf("STATUS famidump-v0.2 mirror=%c pins=%s md=0x%02X\n",
+  Serial.printf("STATUS famidump-v0.3 mirror=%c pins=%s md=0x%02X\n",
                 m, pins ? "PASS" : "FAIL", md);
 }
 
@@ -313,7 +313,7 @@ void loop() {
     sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
     line = "";
     switch (cmd) {
-      case 'V': Serial.print("famidump v0.2\n"); break;
+      case 'V': Serial.print("famidump v0.3\n"); break;
       case 'R': handleRead(false, addr, len); break;
       case 'C': handleRead(true, addr, len); break;
       case 'M': Serial.printf("%c\n", detectMirroring()); break;

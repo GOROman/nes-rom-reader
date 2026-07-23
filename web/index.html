@@ -259,6 +259,20 @@
     <div id="log"></div>
   </div>
 </main>
+<div id="fwDialog" class="modal" style="display:none">
+  <div class="modal-box" style="max-width:520px">
+    <h3 data-i18n="fwOldTitle"></h3>
+    <p style="text-align:left; font-size:.9rem" data-i18n="fwOldBody"></p>
+    <pre style="text-align:left; background:var(--ink); color:#d8cfb4; padding:10px;
+                border-radius:2px; font-size:.8rem; overflow-x:auto">cd firmware
+pio run -t upload</pre>
+    <div id="fwVersions" class="status" style="font-size:.85rem; opacity:.85"></div>
+    <div class="row" style="justify-content:center; margin-top:12px">
+      <button id="fwDlgClose" data-i18n="fwOldClose"></button>
+    </div>
+  </div>
+</div>
+
 <div id="pixelDialog" class="modal" style="display:none">
   <div class="modal-box">
     <h3 id="pxTitle">TILE</h3>
@@ -293,7 +307,7 @@
 // ---- i18n ----
 const STRINGS = {
   en: {
-    sub: "Family Computer Cartridge Reader — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.2",
+    sub: "Family Computer Cartridge Reader — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.3",
     c1title: "1. Connect", connect: "🔌 Connect Device", disconnect: "Disconnect",
     statusLabel: "Status:", fwLabel: "Firmware:", mirrorLabel: "Mirroring:",
     connected: "Connected", disconnected: "Disconnected",
@@ -310,6 +324,13 @@ const STRINGS = {
     bankSel: (b, a) => "  bank " + b + " selected (via PRG $" + a + ")",
     bankNotFound: b => "Bank " + b + ": no matching byte in PRG — cannot select this bank",
     bankMode: n => "Reading CHR with bank switching (" + n + " banks)",
+    bankNeedFw: "Firmware does not support the B command. Please flash the latest firmware (cd firmware && pio run -t upload)",
+    fwOldTitle: "⚠ FIRMWARE OUT OF DATE",
+    fwOldBody: "The connected device runs older firmware. Newer features (CHR bank switching, status command) may not work. Flash the latest firmware from the repository:",
+    fwOldClose: "OK, continue anyway",
+    fwVersions: (cur, req) => "Device: " + cur + "  /  Recommended: v" + req,
+    fwOldLog: (cur, req) => "⚠ Firmware " + cur + " is older than the recommended v" + req + " — some features may be unavailable",
+    bankBadResp: r => "Unexpected response to bank select: " + r,
     cViewerTitle: "🐵 CHR Viewer (Super Monkey Viewer)",
     loadFileLabel: "Load .nes/.chr:", viewDump: "👁 View last dump",
     paletteLabel: "Palette:", cyclePal: "🎨 Next palette",
@@ -366,7 +387,7 @@ const STRINGS = {
     noCrcLine: l => "CRC line not received: " + l,
   },
   ja: {
-    sub: "ファミリーコンピュータ カセット読み出し — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.2",
+    sub: "ファミリーコンピュータ カセット読み出し — WebSerial (Chrome / Edge) / M5Stamp S3・famidump v0.3",
     c1title: "1. 接続", connect: "🔌 デバイスに接続", disconnect: "切断",
     statusLabel: "状態:", fwLabel: "ファーム:", mirrorLabel: "ミラーリング:",
     connected: "接続中", disconnected: "未接続",
@@ -383,6 +404,13 @@ const STRINGS = {
     bankSel: (b, a) => "  バンク " + b + " 選択 (PRG $" + a + " 経由)",
     bankNotFound: b => "バンク " + b + ": 一致する値がPRG内に見つかりません(切替不可)",
     bankMode: n => "CHRをバンク切替で読み出します(" + n + "バンク)",
+    bankNeedFw: "ファームウェアが B コマンド未対応です。最新ファームを書き込んでください(cd firmware && pio run -t upload)",
+    fwOldTitle: "⚠ ファームウェアが古い",
+    fwOldBody: "接続されたデバイスのファームウェアが古いバージョンです。新機能(CHRバンク切替・状態取得)が動作しない可能性があります。リポジトリから最新ファームを書き込んでください:",
+    fwOldClose: "OK(このまま続ける)",
+    fwVersions: (cur, req) => "デバイス: " + cur + "  /  推奨: v" + req,
+    fwOldLog: (cur, req) => "⚠ ファーム " + cur + " は推奨 v" + req + " より古いため、一部機能が使えない可能性があります",
+    bankBadResp: r => "バンク選択の応答が不正: " + r,
     cViewerTitle: "🐵 CHRビューア (Super Monkey Viewer)",
     loadFileLabel: ".nes/.chr読込:", viewDump: "👁 直近の吸い出しを表示",
     paletteLabel: "パレット:", cyclePal: "🎨 次のパレット",
@@ -535,6 +563,32 @@ async function readExact(n, timeoutMs = 20000) {
 }
 async function send(str) { await writer.write(new TextEncoder().encode(str)); }
 
+// このWeb UIが必要とするファームウェアの最低バージョン。
+// 新しいコマンド(B: バンク切替 など)を追加したら上げること。
+const REQUIRED_FW = '0.3';
+
+// "famidump v0.2" / "STATUS famidump-v0.3 ..." からバージョン部分を取り出す
+function parseFwVersion(s) {
+  const m = /famidump[ -]v?([0-9]+(?:\.[0-9]+)*)/i.exec(s || '');
+  return m ? m[1] : null;
+}
+// a < b なら -1、等しければ 0、a > b なら 1
+function cmpVersion(a, b) {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+function checkFirmwareVersion(verLine) {
+  const v = parseFwVersion(verLine);
+  if (!v || cmpVersion(v, REQUIRED_FW) >= 0) return;
+  log(t('fwOldLog', 'v' + v, REQUIRED_FW), 'log-ng');
+  document.getElementById('fwVersions').textContent = t('fwVersions', 'v' + v, REQUIRED_FW);
+  document.getElementById('fwDialog').style.display = 'flex';
+}
+
 async function connect() {
   if (!('serial' in navigator)) { document.getElementById('noSerialWarn').style.display = 'block'; return; }
   try {
@@ -562,6 +616,7 @@ async function connect() {
     document.getElementById('btnConnect').disabled = true;
     document.getElementById('btnDisconnect').disabled = false;
     log(t('connMsg', ver, m), 'log-ok');
+    checkFirmwareVersion(ver);  // 古ければダイアログで警告
     await checkStatus();  // 接続直後に状態取得
   } catch (e) { log(t('connErr', e.message), 'log-ng'); setStatus('error'); }
 }
@@ -650,10 +705,13 @@ function findBankAddr(prg, bank) {
 }
 async function selectBank(prg, bank) {
   const addr = findBankAddr(prg, bank);
-  if (addr === null) { log(t('bankNotFound', bank), 'log-ng'); return false; }
+  if (addr === null) throw new Error(t('bankNotFound', bank));
   await send(`B ${addr.toString(16).toUpperCase()}\n`);
   const resp = await readLine(3000);
-  if (!resp.startsWith('BANK')) { log('bank select failed: ' + resp, 'log-ng'); return false; }
+  if (!resp.startsWith('BANK')) {
+    // ERR = 古いファームで B コマンド未対応
+    throw new Error(resp.trim() === 'ERR' ? t('bankNeedFw') : t('bankBadResp', resp));
+  }
   log(t('bankSel', bank, addr.toString(16).toUpperCase()), 'log-info');
   return true;
 }
@@ -662,7 +720,7 @@ async function dumpChrBanked(prg, chrKb, onProgress) {
   log(t('bankMode', banks), 'log-info');
   const out = new Uint8Array(chrKb * 1024);
   for (let b = 0; b < banks; b++) {
-    if (!await selectBank(prg, b)) throw new Error(t('bankNotFound', b));
+    await selectBank(prg, b);
     const part = await dumpRegion('C', 0x0000, 8 * 1024,
       p => onProgress && onProgress((b + p) / banks));
     out.set(part.data, b * 8 * 1024);
@@ -1147,6 +1205,7 @@ function initViewer() {
   renderSwatches();
 }
 
+document.getElementById('fwDlgClose').onclick = () => { document.getElementById('fwDialog').style.display = 'none'; };
 document.getElementById('btnConnect').onclick = connect;
 document.getElementById('btnDisconnect').onclick = disconnect;
 document.getElementById('btnDump').onclick = doDump;
