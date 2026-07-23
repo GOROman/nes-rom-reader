@@ -197,6 +197,7 @@
       <canvas id="chrCanvas" style="image-rendering:pixelated; display:block"></canvas>
     </div>
     <p style="font-size:.75rem; opacity:.7; margin:.4em 0" data-i18n="viewerHint"></p>
+    <p style="font-size:.8rem; margin:.2em 0; color:var(--maroon); font-weight:bold" data-i18n="dblHint"></p>
     <div class="row" style="margin-top:8px">
       <button id="btnEditMode" class="secondary" data-i18n="editMode"></button>
       <span id="selTile" class="status" style="opacity:.85"></span>
@@ -235,6 +236,21 @@
     <div id="log"></div>
   </div>
 </main>
+<div id="pixelDialog" class="modal" style="display:none">
+  <div class="modal-box">
+    <h3 id="pxTitle">TILE</h3>
+    <canvas id="pxCanvas" width="288" height="288"
+            style="image-rendering:pixelated; border:3px solid var(--maroon); background:#000;
+                   cursor:crosshair; touch-action:none; max-width:80vw; max-height:60vh"></canvas>
+    <div class="row" id="pxPal" style="justify-content:center; margin-top:12px; gap:8px"></div>
+    <div class="row" style="justify-content:center; margin-top:12px">
+      <button id="pxApply" data-i18n="pxApply"></button>
+      <button id="pxClear" class="secondary" data-i18n="pxClear"></button>
+      <button id="pxCancel" class="secondary" data-i18n="pxCancel"></button>
+    </div>
+  </div>
+</div>
+
 <div id="dumpDialog" class="modal" style="display:none">
   <div class="modal-box">
     <h3 id="dumpDlgTitle">DUMPING...</h3>
@@ -280,6 +296,10 @@ const STRINGS = {
     editHint: "Click a tile to select it, then Erase or paste another tile over it to censor a glyph/logo. CHR is pixel graphics (not text), so words cannot be auto-detected — edit the tiles you spot, then download.",
     selInfo: n => "Selected tile: #" + n,
     noNes: "No .nes source (this data was a raw .chr). Use Download .chr.",
+    pxApply: "✔ Apply", pxClear: "Clear", pxCancel: "Cancel",
+    pxTitle: n => "PIXEL EDITOR — TILE #" + n,
+    pxDone: n => "Tile #" + n + " updated in the pixel editor",
+    dblHint: "💡 Double-click a tile to open the 8×8 pixel editor.",
     c3title: "3. Factory Test",
     testDesc: "Insert a reference cartridge (known CRC) and run. If the dumped CRC matches, result is PASS. For post-assembly 100% inspection.",
     goldPrgLabel: "Ref PRG-CRC", goldChrLabel: "Ref CHR-CRC (opt)",
@@ -336,6 +356,10 @@ const STRINGS = {
     editHint: "タイルをクリックして選択 → 「消去」または別タイルを貼り付けて字形/ロゴを修正します。CHRはピクセル画像(文字ではない)ため語句の自動検出はできません。見つけたタイルを編集して保存してください。",
     selInfo: n => "選択中タイル: #" + n,
     noNes: ".nes元データがありません(生の.chr読込のため)。「.chr 保存」をご利用ください。",
+    pxApply: "✔ 適用", pxClear: "全消去", pxCancel: "キャンセル",
+    pxTitle: n => "ドット絵エディタ — タイル #" + n,
+    pxDone: n => "タイル #" + n + " をドット絵エディタで更新しました",
+    dblHint: "💡 タイルをダブルクリックすると 8×8 ドット絵エディタが開きます。",
     c3title: "3. 出荷テスト",
     testDesc: "基準カセット(既知のCRCのカセット)を挿して実行 → 吸い出しCRCが基準値と一致すれば PASS。組み立て後の全数検査用です。",
     goldPrgLabel: "基準PRG-CRC", goldChrLabel: "基準CHR-CRC(任意)",
@@ -760,22 +784,110 @@ function renderChr() {
   document.getElementById('viewerInfo').textContent = t('tilesInfo', nTiles, Math.round(chrData.length / 1024));
 }
 
-// キャンバスクリック→タイル選択(編集モード時)
-function onCanvasClick(e) {
-  if (!document.getElementById('btnEditMode').classList.contains('active')) return;
+// クリック座標→タイル番号
+function tileFromEvent(e) {
   const canvas = document.getElementById('chrCanvas');
-  if (!chrData || !canvas._perRow) return;
+  if (!chrData || !canvas._perRow) return -1;
   const r = canvas.getBoundingClientRect();
   const px = (e.clientX - r.left) * (canvas.width / r.width);
   const py = (e.clientY - r.top) * (canvas.height / r.height);
   const tsz = 8 * canvas._scale;
-  const tx = Math.floor(px / tsz), ty = Math.floor(py / tsz);
-  const idx = ty * canvas._perRow + tx;
-  if (idx >= 0 && idx < canvas._nTiles) {
-    selectedTile = idx;
-    document.getElementById('selTile').textContent = t('selInfo', idx);
+  const idx = Math.floor(py / tsz) * canvas._perRow + Math.floor(px / tsz);
+  return (idx >= 0 && idx < canvas._nTiles) ? idx : -1;
+}
+
+// キャンバスクリック→タイル選択(編集モード時)
+function onCanvasClick(e) {
+  if (!document.getElementById('btnEditMode').classList.contains('active')) return;
+  const idx = tileFromEvent(e);
+  if (idx < 0) return;
+  selectedTile = idx;
+  document.getElementById('selTile').textContent = t('selInfo', idx);
+  renderChr();
+}
+
+// ===== ドット絵エディタ(8×8ピクセル) =====
+const PX_CELL = 36;           // 1ドットの表示サイズ
+let pxTile = -1;              // 編集中タイル
+let pxBuf = new Uint8Array(64); // 各ドットの色番号(0-3)
+let pxColor = 3;              // 選択中の色番号
+let pxDrawing = false;
+
+function tileToPixels(idx) {
+  const b = idx * 16, out = new Uint8Array(64);
+  for (let y = 0; y < 8; y++) {
+    const p0 = chrData[b + y], p1 = chrData[b + y + 8];
+    for (let x = 0; x < 8; x++) {
+      const bit = 7 - x;
+      out[y * 8 + x] = ((p0 >> bit) & 1) | (((p1 >> bit) & 1) << 1);
+    }
+  }
+  return out;
+}
+function pixelsToTile(idx, px) {
+  const b = idx * 16;
+  for (let y = 0; y < 8; y++) {
+    let p0 = 0, p1 = 0;
+    for (let x = 0; x < 8; x++) {
+      const c = px[y * 8 + x] & 3, bit = 7 - x;
+      if (c & 1) p0 |= 1 << bit;
+      if (c & 2) p1 |= 1 << bit;
+    }
+    chrData[b + y] = p0; chrData[b + y + 8] = p1;
+  }
+}
+function renderPx() {
+  const cv = document.getElementById('pxCanvas');
+  const ctx = cv.getContext('2d');
+  cv.width = 8 * PX_CELL; cv.height = 8 * PX_CELL;
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+    ctx.fillStyle = curPal[pxBuf[y * 8 + x]] || '#000';
+    ctx.fillRect(x * PX_CELL, y * PX_CELL, PX_CELL, PX_CELL);
+  }
+  // グリッド線
+  ctx.strokeStyle = 'rgba(154,32,26,.55)'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 8; i++) {
+    ctx.beginPath(); ctx.moveTo(i * PX_CELL + .5, 0); ctx.lineTo(i * PX_CELL + .5, 8 * PX_CELL); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * PX_CELL + .5); ctx.lineTo(8 * PX_CELL, i * PX_CELL + .5); ctx.stroke();
+  }
+}
+function renderPxPalette() {
+  const box = document.getElementById('pxPal');
+  box.innerHTML = '';
+  curPal.forEach((col, i) => {
+    const sw = document.createElement('span');
+    sw.style.cssText = `width:34px;height:34px;background:${col};display:inline-block;cursor:pointer;` +
+      `border:3px solid ${i === pxColor ? 'var(--gold)' : 'var(--ink)'};box-shadow:2px 2px 0 var(--maroon-dk)`;
+    sw.title = 'color ' + i;
+    sw.onclick = () => { pxColor = i; renderPxPalette(); };
+    box.appendChild(sw);
+  });
+}
+function pxPaint(e) {
+  const cv = document.getElementById('pxCanvas');
+  const r = cv.getBoundingClientRect();
+  const x = Math.floor((e.clientX - r.left) * (cv.width / r.width) / PX_CELL);
+  const y = Math.floor((e.clientY - r.top) * (cv.height / r.height) / PX_CELL);
+  if (x < 0 || x > 7 || y < 0 || y > 7) return;
+  pxBuf[y * 8 + x] = pxColor;
+  renderPx();
+}
+function openPixelEditor(idx) {
+  if (!chrData || idx < 0) return;
+  pxTile = idx;
+  pxBuf = tileToPixels(idx);
+  document.getElementById('pxTitle').textContent = t('pxTitle', idx);
+  renderPxPalette(); renderPx();
+  document.getElementById('pixelDialog').style.display = 'flex';
+}
+function closePixelEditor() { document.getElementById('pixelDialog').style.display = 'none'; pxTile = -1; }
+function applyPixelEditor() {
+  if (pxTile >= 0) {
+    pixelsToTile(pxTile, pxBuf);
+    log(t('pxDone', pxTile), 'log-ok');
     renderChr();
   }
+  closePixelEditor();
 }
 function eraseTile() {
   if (selectedTile < 0 || !chrData) return;
@@ -883,7 +995,19 @@ function initViewer() {
   document.getElementById('chrFile').onchange = e => { if (e.target.files[0]) loadChrFile(e.target.files[0]); };
   document.getElementById('btnViewDump').onclick = () => { if (window.lastChr) setChrData(window.lastChr); };
   // タイル編集(修正)
-  document.getElementById('chrCanvas').addEventListener('click', onCanvasClick);
+  const cv = document.getElementById('chrCanvas');
+  cv.addEventListener('click', onCanvasClick);
+  // ダブルクリックでドット絵エディタ起動(編集モード不要)
+  cv.addEventListener('dblclick', e => { const i = tileFromEvent(e); if (i >= 0) openPixelEditor(i); });
+  // ドット絵エディタの操作
+  const pxc = document.getElementById('pxCanvas');
+  pxc.addEventListener('pointerdown', e => { pxDrawing = true; pxc.setPointerCapture(e.pointerId); pxPaint(e); });
+  pxc.addEventListener('pointermove', e => { if (pxDrawing) pxPaint(e); });
+  pxc.addEventListener('pointerup', () => { pxDrawing = false; });
+  pxc.addEventListener('pointercancel', () => { pxDrawing = false; });
+  document.getElementById('pxApply').onclick = applyPixelEditor;
+  document.getElementById('pxCancel').onclick = closePixelEditor;
+  document.getElementById('pxClear').onclick = () => { pxBuf.fill(0); renderPx(); };
   document.getElementById('btnEditMode').onclick = () => {
     const b = document.getElementById('btnEditMode');
     b.classList.toggle('active');
