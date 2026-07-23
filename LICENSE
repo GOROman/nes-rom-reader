@@ -1,0 +1,38 @@
+NULL License
+Copyright (c) 2026 GOROman (Yoshihito Kondoh)
+
+This project — including its hardware design files, firmware, host tools,
+web UI, and documentation — is provided under the following terms.
+
+1. Freedom to use
+   You may use, copy, modify, build, and redistribute this work freely,
+   for personal, educational, research, and non-commercial purposes.
+   You may also build the hardware for yourself and for others.
+
+2. Ownership
+   All rights to this work remain with GOROman. Nothing in this license
+   transfers ownership, and public availability does not place this work
+   into the public domain.
+
+3. Attribution
+   Keep this notice with any copy or substantial portion of the work, and
+   credit GOROman in derivative works.
+
+4. Commercial use
+   Selling this work, selling hardware based on this design, or otherwise
+   using it commercially requires prior discussion with GOROman.
+   Please get in touch: https://x.com/GOROman
+
+5. No warranty
+   THIS WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+   THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+   IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+   CONNECTION WITH THIS WORK OR ITS USE. You build and operate this hardware
+   at your own risk; it can damage your cartridges, your computer, or itself.
+
+6. Your own dumps
+   This tool reads data from cartridges you own. You are responsible for
+   complying with the copyright laws that apply to you. Do not distribute
+   ROM images you do not hold the rights to.

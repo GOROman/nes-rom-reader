@@ -140,12 +140,12 @@ USB CDC、115200 baud。1行コマンド:
 
 | コマンド | 応答 |
 |---|---|
-| `V` | `famidump v0.2` |
+| `V` | `famidump v0.3` |
 | `R <addr_hex> <len_hex>` | `OK <len>` + 生データ + `CRC xxxxxxxx`(PRG) |
 | `C <addr_hex> <len_hex>` | 同上(CHR) |
 | `M` | `H` / `V` / `?` — ミラーリング |
 | `T` | ペーシング付きセルフテスト、最後に `SELFTEST PASS/FAIL` |
-| `S` | `STATUS famidump-v0.2 mirror=? pins=PASS md=0x20` |
+| `S` | `STATUS famidump-v0.3 mirror=? pins=PASS md=0x20` |
 | `B <addr_hex>` | CNROMバンク選択のダミーライトサイクル → `BANK xxxx` |
 
 CRCは CRC32(IEEE 802.3 / `zlib.crc32` 互換)、8桁の大文字16進です。
@@ -155,6 +155,14 @@ CRCは CRC32(IEEE 802.3 / `zlib.crc32` 互換)、8桁の大文字16進です。
 - リポジトリ: https://github.com/GOROman/nes-rom-reader
 - Web UI(公開版): https://goroman.github.io/nes-rom-reader/web/
 - 作者 X: [@GOROman](https://x.com/GOROman)
+
+## ライセンス
+
+**NULL ライセンス** — [LICENSE](LICENSE) を参照。
+
+非商用であれば自由に使用・改変・再配布できますが、権利は **GOROman** に帰属します。
+販売など商用利用の場合は事前にご相談ください: [@GOROman](https://x.com/GOROman)。
+無保証で提供されます。
 
 ## クレジット
 
