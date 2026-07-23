@@ -7,6 +7,11 @@
 //   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
 //   T                      -> セルフテスト。複数行レポートの最後に
 //                             "SELFTEST PASS\n" または "SELFTEST FAIL\n"
+//   B <addr_hex>           -> バンク選択(CNROM等)。指定アドレスへダミーライト
+//                             サイクルを発生させ "BANK xxxx\n" を返す。
+//                             バスコンフリクトを利用するため、addr には
+//                             「選びたいバンク番号と同じ値が入っているPRGアドレス」
+//                             を指定する(ホスト側でPRGダンプから検索)。
 //
 // データブロック直後の "CRC xxxxxxxx\n" は生データの CRC32
 // (IEEE 802.3 / zlib.crc32 互換、8桁大文字hex)。ホスト側で照合する。
@@ -105,6 +110,37 @@ static uint8_t readPrg(uint16_t addr) {
   digitalWrite(PIN_OE_PRG, HIGH);
   digitalWrite(PIN_ROMSEL, HIGH);
   return v;
+}
+
+static void busIdle();  // 前方宣言
+
+// --- バンク切替(CNROM等): バスコンフリクトを利用したダミーライトサイクル ---
+//
+// CNROM は書き込みサイクル中も PRG-ROM が出力を続ける(AND型バスコンフリクト)。
+// そのため「選びたいバンク番号と同じ値が入っている PRG アドレス」へ書き込みサイクルを
+// 発生させれば、ROM 自身がその値をデータバスへ出し、カートリッジ側のラッチが取り込む。
+// → 本基板はデータバスを駆動できない(読み出し専用)が、バンク選択は可能。
+//
+// ホスト側は先に PRG を吸い出し、PRG[X] == バンク番号 となる X を探して
+// addr = 0x8000 + X を渡す。
+static void bankSelectWrite(uint16_t addr) {
+  srWrite32(srCpuAddr(addr));   // アドレス確定
+  digitalWrite(PIN_OE_PRG, HIGH);  // 自分はデータバスを見ない(ROMに任せる)
+  delayMicroseconds(2);
+
+  digitalWrite(PIN_RW, LOW);    // 書き込みサイクル
+  delayMicroseconds(1);
+  digitalWrite(PIN_ROMSEL, LOW);  // PRG-ROM がデータを出す(バスコンフリクト)
+  delayMicroseconds(2);
+  digitalWrite(PIN_M2, LOW);      // M2 をトグル(ラッチのクロック源対策)
+  delayMicroseconds(2);
+  digitalWrite(PIN_M2, HIGH);
+  delayMicroseconds(2);
+  digitalWrite(PIN_ROMSEL, HIGH); // 立ち上がりでラッチする実装が多い
+  delayMicroseconds(1);
+  digitalWrite(PIN_RW, HIGH);     // 読み出しに戻す
+  delayMicroseconds(2);
+  busIdle();
 }
 
 // CHR空間読み出し。addrはPPUアドレス($0000-$1FFF、PPU A13=0 → bit30=1)
@@ -283,6 +319,7 @@ void loop() {
       case 'M': Serial.printf("%c\n", detectMirroring()); break;
       case 'T': handleSelfTest(); break;
       case 'S': handleStatus(); break;
+      case 'B': bankSelectWrite((uint16_t)addr); Serial.printf("BANK %04X\n", (unsigned)(addr & 0xFFFF)); break;
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
   }

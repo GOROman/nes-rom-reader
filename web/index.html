@@ -164,6 +164,7 @@
       <label><span data-i18n="mapper"></span> <input type="number" id="mapper" value="0" min="0" max="255"></label>
       <label>PRG(KB) <input type="number" id="prg" value="32" min="0" step="16"></label>
       <label>CHR(KB) <input type="number" id="chr" value="8" min="0" step="8"></label>
+      <label><input type="checkbox" id="bankSwitch" style="width:auto"> <span data-i18n="bankSwitchLabel"></span></label>
     </div>
     <div class="row" style="margin-top:8px">
       <button id="btnDump" disabled data-i18n="dump"></button>
@@ -305,6 +306,10 @@ const STRINGS = {
     stChecking: "Checking...", stPinsNg: "⚠ Control pins FAIL — check ESP32 GPIO wiring",
     statusLine: (m, p) => "READY / mirror " + m + " / pins " + p,
     c2title: "2. Dump", mapper: "Mapper", dump: "⬇️ Dump & Save .nes",
+    bankSwitchLabel: "CHR bank switching (CNROM / mapper 3)",
+    bankSel: (b, a) => "  bank " + b + " selected (via PRG $" + a + ")",
+    bankNotFound: b => "Bank " + b + ": no matching byte in PRG — cannot select this bank",
+    bankMode: n => "Reading CHR with bank switching (" + n + " banks)",
     cViewerTitle: "🐵 CHR Viewer (Super Monkey Viewer)",
     loadFileLabel: "Load .nes/.chr:", viewDump: "👁 View last dump",
     paletteLabel: "Palette:", cyclePal: "🎨 Next palette",
@@ -374,6 +379,10 @@ const STRINGS = {
     stChecking: "チェック中...", stPinsNg: "⚠ 制御ピンFAIL — ESP32のGPIO配線を確認",
     statusLine: (m, p) => "待機 / ミラー " + m + " / ピン " + p,
     c2title: "2. 吸い出し", mapper: "マッパー", dump: "⬇️ 吸い出して .nes 保存",
+    bankSwitchLabel: "CHRバンク切替(CNROM / mapper 3)",
+    bankSel: (b, a) => "  バンク " + b + " 選択 (PRG $" + a + " 経由)",
+    bankNotFound: b => "バンク " + b + ": 一致する値がPRG内に見つかりません(切替不可)",
+    bankMode: n => "CHRをバンク切替で読み出します(" + n + "バンク)",
     cViewerTitle: "🐵 CHRビューア (Super Monkey Viewer)",
     loadFileLabel: ".nes/.chr読込:", viewDump: "👁 直近の吸い出しを表示",
     paletteLabel: "パレット:", cyclePal: "🎨 次のパレット",
@@ -632,6 +641,35 @@ async function dumpRegion(cmd, addr, length, onProgress) {
   return { data, crc: hostCrc };
 }
 
+// --- CNROM等のCHRバンク切替(バスコンフリクト方式) ---
+// PRG内で「バンク番号と同じ値」を持つアドレスへダミーライトすると、
+// ROM自身がその値をデータバスへ出し、カートリッジのラッチが取り込む。
+function findBankAddr(prg, bank) {
+  const i = prg.indexOf(bank);
+  return i >= 0 ? 0x8000 + i : null;
+}
+async function selectBank(prg, bank) {
+  const addr = findBankAddr(prg, bank);
+  if (addr === null) { log(t('bankNotFound', bank), 'log-ng'); return false; }
+  await send(`B ${addr.toString(16).toUpperCase()}\n`);
+  const resp = await readLine(3000);
+  if (!resp.startsWith('BANK')) { log('bank select failed: ' + resp, 'log-ng'); return false; }
+  log(t('bankSel', bank, addr.toString(16).toUpperCase()), 'log-info');
+  return true;
+}
+async function dumpChrBanked(prg, chrKb, onProgress) {
+  const banks = Math.floor(chrKb / 8);
+  log(t('bankMode', banks), 'log-info');
+  const out = new Uint8Array(chrKb * 1024);
+  for (let b = 0; b < banks; b++) {
+    if (!await selectBank(prg, b)) throw new Error(t('bankNotFound', b));
+    const part = await dumpRegion('C', 0x0000, 8 * 1024,
+      p => onProgress && onProgress((b + p) / banks));
+    out.set(part.data, b * 8 * 1024);
+  }
+  return { data: out, crc: crc32(out) };
+}
+
 function inesHeader(prgKb, chrKb, mapper, vertical) {
   const h = new Uint8Array(16);
   h.set([0x4E, 0x45, 0x53, 0x1A]);
@@ -659,7 +697,12 @@ async function doDump() {
     setStatus('busy');
     const prg = await dumpRegion('R', 0x8000, prgKb * 1024, p => setProg(p * (chrKb ? 50 : 100), 'PRG...'));
     let chr = { data: new Uint8Array(0) };
-    if (chrKb) chr = await dumpRegion('C', 0x0000, chrKb * 1024, p => setProg(50 + p * 50, 'CHR...'));
+    const useBanks = document.getElementById('bankSwitch').checked && chrKb > 8;
+    if (chrKb) {
+      chr = useBanks
+        ? await dumpChrBanked(prg.data, chrKb, p => setProg(50 + p * 50, 'CHR (bank)...'))
+        : await dumpRegion('C', 0x0000, chrKb * 1024, p => setProg(50 + p * 50, 'CHR...'));
+    }
     setProg(100, 'DONE');
     if (new Set(prg.data).size === 1) log(t('allSame', prg.data[0].toString(16)), 'log-ng');
     const header = inesHeader(prgKb, chrKb, mapper, mirror === 'V');
