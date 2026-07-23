@@ -325,6 +325,8 @@ const STRINGS = {
     bankNotFound: b => "Bank " + b + ": no matching byte in PRG — cannot select this bank",
     bankMode: n => "Reading CHR with bank switching (" + n + " banks)",
     bankNeedFw: "Firmware does not support the B command. Please flash the latest firmware (cd firmware && pio run -t upload)",
+    bankCrc: (b, crc) => "  bank " + b + " CRC " + crc,
+    bankSame: "⚠ All CHR banks returned identical data — bank switching had no effect. The cartridge latch may need different strobe timing, or this game is not a bus-conflict CNROM.",
     prgDead: "PRG read failed (all bytes identical). Reseat the cartridge and clean its contacts, then check /ROMSEL (slot pin 44), the CPU data lines (slot pins 36-43) and U6.",
     fwOldTitle: "⚠ FIRMWARE OUT OF DATE",
     fwOldBody: "The connected device runs older firmware. Newer features (CHR bank switching, status command) may not work. Flash the latest firmware from the repository:",
@@ -406,6 +408,8 @@ const STRINGS = {
     bankNotFound: b => "バンク " + b + ": 一致する値がPRG内に見つかりません(切替不可)",
     bankMode: n => "CHRをバンク切替で読み出します(" + n + "バンク)",
     bankNeedFw: "ファームウェアが B コマンド未対応です。最新ファームを書き込んでください(cd firmware && pio run -t upload)",
+    bankCrc: (b, crc) => "  バンク" + b + " CRC " + crc,
+    bankSame: "⚠ 全バンクのCHRが同一内容です。バンク切替が効いていません(ラッチのストローブタイミング不一致、またはバスコンフリクト方式のCNROMではない可能性)",
     prgDead: "PRG が読めていません(全バイト同一)。カセットを挿し直して端子を清掃し、/ROMSEL(スロット44番)・CPUデータ線(スロット36-43番)・U6 の配線を確認してください",
     fwOldTitle: "⚠ ファームウェアが古い",
     fwOldBody: "接続されたデバイスのファームウェアが古いバージョンです。新機能(CHRバンク切替・状態取得)が動作しない可能性があります。リポジトリから最新ファームを書き込んでください:",
@@ -721,12 +725,18 @@ async function dumpChrBanked(prg, chrKb, onProgress) {
   const banks = Math.floor(chrKb / 8);
   log(t('bankMode', banks), 'log-info');
   const out = new Uint8Array(chrKb * 1024);
+  const crcs = [];
   for (let b = 0; b < banks; b++) {
     await selectBank(prg, b);
     const part = await dumpRegion('C', 0x0000, 8 * 1024,
       p => onProgress && onProgress((b + p) / banks));
     out.set(part.data, b * 8 * 1024);
+    crcs.push(part.crc);
+    log(t('bankCrc', b, hex8(part.crc)), 'log-info');
   }
+  // 全バンクのCRCが同じ = ラッチが切り替わっていない(ストローブタイミング不一致)。
+  // Dump自体は成功扱いになってしまうので明示的に警告する。
+  if (banks > 1 && new Set(crcs).size === 1) log(t('bankSame'), 'log-ng');
   return { data: out, crc: crc32(out) };
 }
 
