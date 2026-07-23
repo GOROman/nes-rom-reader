@@ -150,7 +150,16 @@ On the U8 pads, **bridge these pin pairs** with jumper wire (or solder bridges):
 2–18, 3–17, 4–16, 5–15, 6–14, 7–13, 8–12, 9–11
 ```
 
-The ESP32 signals then reach the 595s and the cartridge directly.
+![U8 jumper wiring](images/assembly/08-u8-jumpers.jpg)
+
+**A real example (photo above).** Eight jumpers running **diagonally and parallel** is what it should look like.
+
+- The **dot (●) on the U8 outline marks pin 1**. From there the bottom row runs left→right: 1, 2, 3 … 10
+- The top row runs right→left: 11, 12 … 20 (so **left→right along the top it reads 20, 19, 18 … 11**)
+- Each jumper therefore goes **from the lower-left area up to the upper-right**
+
+> ⚠️ Afterwards, **check a few connections with a multimeter** (e.g. bottom pin 2 ↔ top pin 18)
+> and make sure adjacent pins aren't shorted together.
 
 ### ⑤ Mounting the M5Stamp (⚠️ v0.1 gotcha)
 
