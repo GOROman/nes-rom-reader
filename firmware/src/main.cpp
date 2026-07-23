@@ -1,12 +1,14 @@
 // nes-rom-reader firmware (M5Stamp S3)
 //
 // ホストとはUSB CDCで通信。プロトコル(1行コマンド、応答はバイナリ):
-//   V                      -> "famidump v0.3\n"
+//   V                      -> "famidump v0.4\n"
 //   R <addr_hex> <len_hex> -> PRG読み出し。"OK <len>\n" + 生データ + "CRC xxxxxxxx\n"
 //   C <addr_hex> <len_hex> -> CHR読み出し。同上
 //   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
 //   T                      -> セルフテスト。複数行レポートの最後に
 //                             "SELFTEST PASS\n" または "SELFTEST FAIL\n"
+//   W <addr_hex> <len_hex> -> バッテリバックアップRAM($6000-$7FFF)読み出し。
+//                             応答形式は R/C と同じ。
 //   B <addr_hex>           -> バンク選択(CNROM等)。指定アドレスへダミーライト
 //                             サイクルを発生させ "BANK xxxx\n" を返す。
 //                             バスコンフリクトを利用するため、addr には
@@ -141,6 +143,27 @@ static void bankSelectWrite(uint16_t addr) {
   digitalWrite(PIN_RW, HIGH);     // 読み出しに戻す
   delayMicroseconds(2);
   busIdle();
+}
+
+// バッテリバックアップRAM(WRAM/SRAM)読み出し。addrは$6000-$7FFF。
+//
+// この領域は /ROMSEL が非アクティブ(High)のまま、カートリッジ側が
+// M2 + CPU A13/A14 をデコードしてRAMを選択する。よってPRG読み出しとは
+// シーケンスが異なり、M2 を Low→High とトグルしてCPUアクセス位相を作る。
+static uint8_t readWram(uint16_t addr) {
+  srWrite32(srCpuAddr(addr));      // A13=A14=1 ($6000-$7FFF)
+  digitalWrite(PIN_ROMSEL, HIGH);  // PRG-ROMは選択しない
+  digitalWrite(PIN_RW, HIGH);      // 読み出し
+  digitalWrite(PIN_M2, LOW);       // アドレス確定フェーズ
+  delayMicroseconds(1);
+  digitalWrite(PIN_M2, HIGH);      // M2 High = CPUアクセス中。ここでRAMが出力
+  delayMicroseconds(2);
+  digitalWrite(PIN_OE_PRG, LOW);
+  delayMicroseconds(1);
+  uint8_t v = readDataBus();
+  digitalWrite(PIN_OE_PRG, HIGH);
+  digitalWrite(PIN_M2, LOW);
+  return v;
 }
 
 // CHR空間読み出し。addrはPPUアドレス($0000-$1FFF、PPU A13=0 → bit30=1)
@@ -278,11 +301,12 @@ static void handleStatus() {
   bool pins = selfCheckPins(false);
   char m = detectMirroring();
   uint8_t md = readMdFloat();
-  Serial.printf("STATUS famidump-v0.3 mirror=%c pins=%s md=0x%02X\n",
+  Serial.printf("STATUS famidump-v0.4 mirror=%c pins=%s md=0x%02X\n",
                 m, pins ? "PASS" : "FAIL", md);
 }
 
-static void handleRead(bool chr, uint32_t addr, uint32_t len) {
+// region: 'R'=PRG-ROM, 'C'=CHR, 'W'=バッテリバックアップRAM($6000-$7FFF)
+static void handleRead(char region, uint32_t addr, uint32_t len) {
   ledBusy();  // 青: 読み出し中
   Serial.printf("OK %lX\n", (unsigned long)len);
   uint8_t buf[256];
@@ -290,7 +314,9 @@ static void handleRead(bool chr, uint32_t addr, uint32_t len) {
   while (len > 0) {
     uint32_t n = min(len, (uint32_t)sizeof(buf));
     for (uint32_t i = 0; i < n; i++)
-      buf[i] = chr ? readChr(addr + i) : readPrg(addr + i);
+      buf[i] = region == 'C' ? readChr(addr + i)
+             : region == 'W' ? readWram(addr + i)
+                             : readPrg(addr + i);
     crc = crc32Update(crc, buf, n);
     Serial.write(buf, n);
     addr += n;
@@ -313,9 +339,10 @@ void loop() {
     sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
     line = "";
     switch (cmd) {
-      case 'V': Serial.print("famidump v0.3\n"); break;
-      case 'R': handleRead(false, addr, len); break;
-      case 'C': handleRead(true, addr, len); break;
+      case 'V': Serial.print("famidump v0.4\n"); break;
+      case 'R': handleRead('R', addr, len); break;
+      case 'C': handleRead('C', addr, len); break;
+      case 'W': handleRead('W', addr, len); break;
       case 'M': Serial.printf("%c\n", detectMirroring()); break;
       case 'T': handleSelfTest(); break;
       case 'S': handleStatus(); break;

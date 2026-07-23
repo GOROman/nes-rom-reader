@@ -132,18 +132,29 @@ python host/factory_test.py --port /dev/cu.usbmodem* --selftest
 Web UI 的 **出厂测试** 面板也能执行同样的流程,并让每个步骤间隔约 1 秒,方便观察状态 LED。
 自检会回读全部输出引脚、驱动移位寄存器,最后返回 `SELFTEST PASS/FAIL`。
 
+### 电池备份存档数据
+
+带存档电池的卡带(火焰之纹章、塞尔达、巫术等)会把存档保存在 `$6000-$7FFF` 的 WRAM 中。
+可通过 Web UI 的 **存档数据** 卡片(CLI 为 `--save-out game.sav`)读出并保存为 `.sav` 文件。
+
+这适用于上电时 WRAM 处于启用状态的卡带。由于本板为只读、无法驱动数据总线,
+因此无法写入启用 WRAM 的映射器寄存器(MMC1 为 PRG 寄存器的 bit4,MMC3 为 `$A001`)。
+如果该位在上电时为关闭状态,读出的结果会是全部相同的字节,工具会给出提示。
+不支持将存档数据写回卡带。
+
 ## 串口协议
 
 USB CDC,115200 波特率。单行命令:
 
 | 命令 | 响应 |
 |---|---|
-| `V` | `famidump v0.3` |
+| `V` | `famidump v0.4` |
 | `R <addr_hex> <len_hex>` | `OK <len>` + 原始数据 + `CRC xxxxxxxx`(PRG) |
 | `C <addr_hex> <len_hex>` | 同上(CHR) |
 | `M` | `H` / `V` / `?` — 镜像方式 |
 | `T` | 带节奏的自检,最后输出 `SELFTEST PASS/FAIL` |
-| `S` | `STATUS famidump-v0.3 mirror=? pins=PASS md=0x20` |
+| `S` | `STATUS famidump-v0.4 mirror=? pins=PASS md=0x20` |
+| `W <addr_hex> <len_hex>` | 读取电池备份 WRAM($6000-$7FFF),响应格式与 `R`/`C` 相同 |
 | `B <addr_hex>` | CNROM 换库用的空写周期 → `BANK xxxx` |
 
 CRC 为 CRC32(IEEE 802.3 / 兼容 `zlib.crc32`),8 位大写十六进制。
