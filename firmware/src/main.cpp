@@ -23,10 +23,11 @@
 //   Q                      -> YM2151 デモ(テストトーン)。"YMDEMO DONE\n"
 //
 // YM2151 は docs/ym2151.md の通り「アドレスバス経由」でカートリッジへ接続する:
-//   D0-7=CPU A0-A7  A0=CPU A8  /WR=CPU R/W  /CS=GND  /RD=+5V  /IC=PPU /WR
+//   D0-7=CPU A0-A7  A0=CPU A8  /WR=CPU A9  /IC=CPU A10  /CS=GND  /RD=+5V
 //   φM=M2ピン(LEDC PWM 3.579545MHz に切替)
-// データバスは使わない(74HCT595 が常時駆動するアドレス線にデータを乗せる)ため
-// U6/BUS_DIR の改造が不要で、BUSY は読めないので固定ウェイトで代替する。
+// データもストローブも 74HCT595 が常時駆動するアドレス線に乗せるため
+// U6/BUS_DIR の改造が不要で、カート側のハンダ付けは PRG ROM の足+
+// エッジフィンガー32(M2)の1点だけで済む。BUSY は固定ウェイトで代替。
 // F 実行後はカートリッジ用コマンド(R/C/W/P/B)と併用しないこと。
 //
 // データブロック直後の "CRC xxxxxxxx\n" は生データの CRC32
@@ -273,13 +274,22 @@ static void busIdle() {
   digitalWrite(PIN_PPU_WR, HIGH);
 }
 
-// --- YM2151 (アドレスバス方式、基板改造不要・全リビジョン対応) ---
+// --- YM2151 (フルアドレスバス方式、基板改造不要・全リビジョン対応) ---
 //
-// YM2151 の D0-7 を CPU A1-A8、A0 を CPU A0 に接続し、74HCT595 が常時5Vで
-// 駆動するアドレス線にレジスタ番号とデータを乗せて CPU R/W(=/WR) をパルスする。
-// /CS は GND 固定、/RD は +5V 固定(ステータスは読まず固定ウェイトで代替)。
-// データバス(U6)を使わないため BUS_DIR 改造が不要。
+// YM2151 をすべてアドレス線だけで駆動する。74HCT595 が常時5Vで駆動するので
+// レベル変換も U6/BUS_DIR 改造も不要:
+//   CA0-CA7 = D0-D7 (PRG ROM pin 10-3 の連続8本)
+//   CA8     = A0    (PRG ROM pin 25)
+//   CA9     = /WR   (PRG ROM pin 24)  srWrite32 でストローブを作る
+//   CA10    = /IC   (PRG ROM pin 21)
+// /CS=GND・/RD=+5V 固定。φM のみエッジフィンガー32(M2)から供給する。
+// /WR パルス幅は srWrite32 1回分(数十µs)になるが、YM2151 はスタティック
+// 入力で幅の上限はなく min 100ns を満たせばよい。
+// 起動直後〜F実行前はシフトレジスタが全0 = /IC=Low なので YM はリセット状態
+// に保たれる(好都合)。
 static const uint32_t YM_CLOCK_HZ = 3579545;  // φM: NTSC カラーバースト
+static const uint16_t YM_WR_N = 1 << 9;   // CPU A9  = /WR (負論理)
+static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
 static void ymClockStart() {
   if (ymClockOn) return;
@@ -291,16 +301,13 @@ static void ymClockStart() {
 // BUSY は読めないので最悪値で待つ。BUSY 期間は φM 68サイクル ≒ 19µs。
 static void ymWaitBusy() { delayMicroseconds(30); }
 
-// アドレス線にデータを確定させて /WR(=CPU R/W) をパルスする。
-// CA0-CA7 = YM D0-D7、CA8 = YM A0(PRG ROM の連続した足 pin3-10 に
-// データ8本を収めるための割り当て)。
+// データと A0 をアドレス線に確定させ、A9 で /WR パルスを作る。
+// セットアップ/ホールドは srWrite32 の所要時間(数十µs)で自然に満たされる。
 static void ymWriteBus(bool a0, uint8_t v) {
-  srWrite32(srCpuAddr((uint16_t)v | (a0 ? 0x100 : 0)));
-  delayMicroseconds(1);          // アドレス=データのセットアップ
-  digitalWrite(PIN_RW, LOW);     // /WR (幅 min 100ns は GPIO 速度で十分満たす)
-  delayMicroseconds(1);
-  digitalWrite(PIN_RW, HIGH);    // 立ち上がりで取り込み
-  delayMicroseconds(1);          // ホールド
+  uint16_t base = (uint16_t)v | (a0 ? 0x100 : 0) | YM_IC_N;
+  srWrite32(srCpuAddr(base | YM_WR_N));  // データ確定、/WR=H
+  srWrite32(srCpuAddr(base));            // /WR=L
+  srWrite32(srCpuAddr(base | YM_WR_N));  // /WR 立ち上がりで取り込み
 }
 
 static void ymWriteReg(uint8_t reg, uint8_t val) {
@@ -314,9 +321,9 @@ static void ymWriteReg(uint8_t reg, uint8_t val) {
 static void ymInit() {
   busIdle();
   ymClockStart();
-  digitalWrite(PIN_PPU_WR, LOW);   // /IC アサート
-  delay(2);                        // 最低 100µs 以上
-  digitalWrite(PIN_PPU_WR, HIGH);
+  srWrite32(srCpuAddr(YM_WR_N));           // /IC=L (A10=0)、/WR=H
+  delay(2);                                // 最低 100µs 以上
+  srWrite32(srCpuAddr(YM_WR_N | YM_IC_N)); // /IC 解除
   delay(2);
 }
 
