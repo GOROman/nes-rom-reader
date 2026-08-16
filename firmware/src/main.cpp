@@ -294,8 +294,8 @@ static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
 static void ymClockStart() {
   if (ymClockOn) return;
-  ledcAttach(PIN_M2, YM_CLOCK_HZ, 4);  // 4bit分解能 → 80MHz/16 = 5MHz まで
-  ledcWrite(PIN_M2, 8);                // duty 8/16 ≒ 50%
+  ledcAttach(PIN_M2, YM_CLOCK_HZ, 3);  // 3bit分解能 (4bit だと div<2 で setup 失敗)
+  ledcWrite(PIN_M2, 4);                // duty 4/8 = 50%
   ymClockOn = true;
 }
 
