@@ -301,7 +301,7 @@ static void busIdle() {
 // 入力で幅の上限はなく min 100ns を満たせばよい。
 // 起動直後〜F実行前はシフトレジスタが全0 = /IC=Low なので YM はリセット状態
 // に保たれる(好都合)。
-static const uint32_t YM_CLOCK_HZ = 3579545;  // φM (データシート上限 4.0MHz。3579545=NTSC標準)
+static const uint32_t YM_CLOCK_HZ = 4000000;  // φM: X68000 と同じ 4MHz
 static const uint16_t YM_WR_N = 1 << 9;   // CPU A9  = /WR (負論理)
 static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
