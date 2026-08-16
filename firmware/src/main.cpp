@@ -364,12 +364,16 @@ static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
 // Core 0 の専用タスク。φ1(約1.79MHz)をポーリングでエッジ検出する。
 // 割り込みは許可したままなので tick 等で稀にビットを落とすが、
 // SH1 エッジ同期のため次ワードで復帰する(軽微なクラックルのみ)。
+// 実際の配線順に依存しないよう、F 実行時に MD0-2 の信号を測って
+// φ1/SH1/SO の役割を自動判別する(ymAudioStart で設定)。
+static volatile uint32_t ymMaskSO  = 1UL << PIN_YM_SO;
+static volatile uint32_t ymMaskSH  = 1UL << PIN_YM_SH1;
+static volatile uint32_t ymMaskP1  = 1UL << PIN_YM_PHI1;
+
 static void ymCaptureLoop(void*) {
-  const uint32_t SO = 1UL << PIN_YM_SO;
-  const uint32_t SH = 1UL << PIN_YM_SH1;
-  const uint32_t P1 = 1UL << PIN_YM_PHI1;
   for (;;) {
     if (!ymCaptureRun) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+    const uint32_t SO = ymMaskSO, SH = ymMaskSH, P1 = ymMaskP1;
     uint32_t prev = REG_READ(GPIO_IN_REG);
     uint16_t sr = 0;
     while (ymCaptureRun) {
@@ -396,6 +400,49 @@ static void ymCaptureLoop(void*) {
 
 static void ymAudioStart() {
   digitalWrite(PIN_OE_CHR, LOW);        // U7 有効化 → SO/SH1/φ1 が G4-G6 に届く
+  delayMicroseconds(10);
+
+  // MD0-2 の信号を100ms測って φ1/SH1/SO を自動判別(配線順に依存しない)。
+  //   φ1: 高速トグル+デューティ40-60% / SH1: 約11k エッジ/100ms / SO: 残り
+  const int cand[3] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1};
+  uint32_t edges[3] = {0}, high[3] = {0}, total = 0;
+  uint32_t prev = REG_READ(GPIO_IN_REG);
+  uint32_t t0 = millis();
+  while (millis() - t0 < 100) {
+    uint32_t in = REG_READ(GPIO_IN_REG);
+    uint32_t chg = in ^ prev;
+    for (int i = 0; i < 3; i++) {
+      if (chg & (1UL << cand[i])) edges[i]++;
+      if (in & (1UL << cand[i])) high[i]++;
+    }
+    total++;
+    prev = in;
+  }
+  int p1 = -1, sh = -1;
+  for (int i = 0; i < 3; i++) {         // φ1: 最速+デューティ50%近辺
+    uint32_t duty = total ? high[i] * 100 / total : 0;
+    if (edges[i] > 15000 && duty > 35 && duty < 65 &&
+        (p1 < 0 || edges[i] > edges[p1])) p1 = i;
+  }
+  for (int i = 0; i < 3; i++) {         // SH1: 55.9kHz パルス(≒11k エッジ)
+    if (i == p1) continue;
+    if (edges[i] > 5000 && edges[i] < 16000 &&
+        (sh < 0 || edges[i] < edges[sh])) sh = i;
+  }
+  if (p1 >= 0 && sh >= 0) {
+    int so = 3 - p1 - sh;
+    ymMaskP1 = 1UL << cand[p1];
+    ymMaskSH = 1UL << cand[sh];
+    ymMaskSO = 1UL << cand[so];
+    Serial.printf("YMMAP phi1=MD%d sh1=MD%d so=MD%d\n", cand[p1]-4, cand[sh]-4, cand[so]-4);
+  } else {
+    Serial.printf("YMMAP DEFAULT (edges %lu/%lu/%lu duty %lu/%lu/%lu%%)\n",
+                  (unsigned long)edges[0], (unsigned long)edges[1], (unsigned long)edges[2],
+                  (unsigned long)(total ? high[0]*100/total : 0),
+                  (unsigned long)(total ? high[1]*100/total : 0),
+                  (unsigned long)(total ? high[2]*100/total : 0));
+  }
+
   ledcAttach(PIN_PWM_OUT, PWM_FREQ, PWM_RES);
   ledcWrite(PIN_PWM_OUT, 256);          // 無音(中点)
   ymCaptureRun = true;
@@ -491,6 +538,46 @@ static void ymDiag() {
   Serial.printf("DIAG MD0-7 edges:");
   for (int i = 0; i < 8; i++) Serial.printf(" %lu", (unsigned long)cnt[i]);
   Serial.print("\n");
+
+  // MD0-2 のデューティ比(High率)。信号の種別判定用:
+  //   φ1 ≒50% / SH1 ≒ 数%〜15% / SO は無音時 ≒10%前後(データ依存)
+  digitalWrite(PIN_OE_CHR, LOW);
+  delayMicroseconds(10);
+  uint32_t hi0 = 0, hi1 = 0, hi2 = 0;
+  const uint32_t N = 200000;
+  for (uint32_t i = 0; i < N; i++) {
+    uint32_t in = REG_READ(GPIO_IN_REG);
+    if (in & (1UL << PIN_D[0])) hi0++;
+    if (in & (1UL << PIN_D[1])) hi1++;
+    if (in & (1UL << PIN_D[2])) hi2++;
+  }
+  if (oeWas) digitalWrite(PIN_OE_CHR, HIGH);
+  Serial.printf("DIAG duty MD0=%lu%% MD1=%lu%% MD2=%lu%% (phi1=50%%, SH1/SO=low)\n",
+                (unsigned long)(hi0 * 100 / N), (unsigned long)(hi1 * 100 / N),
+                (unsigned long)(hi2 * 100 / N));
+
+  // /IC を押さえたまま MD0 を測る。φ1 はリセット中も走り続けるが、
+  // SO/SH1 はリセット中は停止するはず → MD0 の正体を確定できる。
+  if (ymClockOn) {
+    srWrite32(srCpuAddr(YM_WR_N));            // /IC=L
+    delay(2);
+    digitalWrite(PIN_OE_CHR, LOW);
+    delayMicroseconds(10);
+    uint32_t icEdges = 0, icHi = 0;
+    prev = REG_READ(GPIO_IN_REG);
+    t0 = millis();
+    while (millis() - t0 < 50) {
+      uint32_t in = REG_READ(GPIO_IN_REG);
+      if ((in ^ prev) & (1UL << PIN_D[0])) icEdges++;
+      if (in & (1UL << PIN_D[0])) icHi++;
+      prev = in;
+    }
+    srWrite32(srCpuAddr(YM_WR_N | YM_IC_N));  // /IC 解除
+    delay(2);
+    if (oeWas) digitalWrite(PIN_OE_CHR, HIGH);
+    Serial.printf("DIAG IC-hold MD0 edges/50ms=%lu (toggling=phi1, still=SO)\n",
+                  (unsigned long)icEdges);
+  }
 
   // M2(G42) の読み戻しで φM が実際に出ているか確認。
   // IO_MUX の入力イネーブルだけ立てるので LEDC 出力は壊さない。
