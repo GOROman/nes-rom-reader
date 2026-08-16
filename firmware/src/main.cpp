@@ -716,6 +716,9 @@ void setup() {
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
+  // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
+  // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
+  Serial.printf("RST reason=%d\n", (int)esp_reset_reason());
   ledReady();               // 電源ON = 緑
 }
 
@@ -828,23 +831,6 @@ void loop() {
   // スタンドアロン自動演奏: 電源ONから2秒間シリアル入力がなければ
   // YM2151 を初期化してデモをループ再生する。シリアル入力(=最初のコマンド)で
   // 演奏を止め、φM も停止して通常のダンパー動作へ完全復帰する。
-  static bool autoPlayChecked = false;
-  if (!autoPlayChecked) {
-    if (Serial.available()) {
-      autoPlayChecked = true;          // ホストが先に喋った → 通常モード
-    } else if (millis() > 2000) {
-      autoPlayChecked = true;
-      ymInit();
-      ledBusy();
-      ymDemo();                        // シリアル入力が来るまで演奏
-      ymClockStop();                   // M2 を GPIO に戻す
-      busIdle();
-      ledReady();
-    } else {
-      return;
-    }
-  }
-
   static String line;
   while (Serial.available()) {
     char c = Serial.read();
