@@ -297,7 +297,7 @@ static void busIdle() {
 // 入力で幅の上限はなく min 100ns を満たせばよい。
 // 起動直後〜F実行前はシフトレジスタが全0 = /IC=Low なので YM はリセット状態
 // に保たれる(好都合)。
-static const uint32_t YM_CLOCK_HZ = 3579545;  // φM: NTSC カラーバースト
+static const uint32_t YM_CLOCK_HZ = 3579545;  // φM (データシート上限 4.0MHz。3579545=NTSC標準)
 static const uint16_t YM_WR_N = 1 << 9;   // CPU A9  = /WR (負論理)
 static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
@@ -377,6 +377,9 @@ static void ymCaptureLoop(void*) {
     const uint32_t SO = ymMaskSO, SH = ymMaskSH, P1 = ymMaskP1;
     uint32_t prev = REG_READ(GPIO_IN_REG);
     uint16_t sr = 0;
+    // キャプチャ中は Core 0 の割り込み(tick等)を止めてビット落ちを防ぐ。
+    // USB/シリアル/再生制御は Core 1 側なので影響しない。
+    portDISABLE_INTERRUPTS();
     while (ymCaptureRun) {
       uint32_t in = REG_READ(GPIO_IN_REG);
       uint32_t chg = in ^ prev;
@@ -393,9 +396,16 @@ static void ymCaptureLoop(void*) {
         ymLastRaw = sr;
         if (duty < ymDutyMin) ymDutyMin = duty;
         if (duty > ymDutyMax) ymDutyMax = duty;
+        // ラッチ直後は左chスロット(約9µs)でビットを失わない安全窓。
+        // ここで一瞬だけ割り込みを許可し、溜まった tick を処理させて
+        // 割り込みウォッチドッグ(IWDT)の発火を防ぐ。
+        portENABLE_INTERRUPTS();
+        __asm__ __volatile__("nop; nop; nop; nop;");
+        portDISABLE_INTERRUPTS();
       }
       prev = in;
     }
+    portENABLE_INTERRUPTS();
   }
 }
 
@@ -403,32 +413,44 @@ static void ymAudioStart() {
   digitalWrite(PIN_OE_CHR, LOW);        // U7 有効化 → SO/SH1/φ1 が G4-G6 に届く
   delayMicroseconds(10);
 
-  // MD0-2 の信号を100ms測って φ1/SH1/SO を自動判別(配線順に依存しない)。
-  //   φ1: 高速トグル+デューティ40-60% / SH1: 約11k エッジ/100ms / SO: 残り
+  // MD0-2 の信号を測って φ1/SH1/SO を自動判別(配線順に依存しない)。
+  //   SH1: サンプルレート由来の固定エッジ数(2×φM/64)で識別
+  //   φ1 vs SO: /IC ホールド中も走り続けるのが φ1
+  // ポーリングと信号周波数のストロボ同期を避けるため計測にジッタを入れる。
   const int cand[3] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1};
-  uint32_t edges[3] = {0}, high[3] = {0}, total = 0;
-  uint32_t prev = REG_READ(GPIO_IN_REG);
-  uint32_t t0 = millis();
-  while (millis() - t0 < 100) {
-    uint32_t in = REG_READ(GPIO_IN_REG);
-    uint32_t chg = in ^ prev;
-    for (int i = 0; i < 3; i++) {
-      if (chg & (1UL << cand[i])) edges[i]++;
-      if (in & (1UL << cand[i])) high[i]++;
+  auto measure = [&](uint32_t ms, uint32_t* out) {
+    out[0] = out[1] = out[2] = 0;
+    uint32_t prev = REG_READ(GPIO_IN_REG), j = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < ms) {
+      uint32_t in = REG_READ(GPIO_IN_REG);
+      uint32_t chg = in ^ prev;
+      for (int i = 0; i < 3; i++)
+        if (chg & (1UL << cand[i])) out[i]++;
+      prev = in;
+      for (volatile uint32_t k = 0; k < (j & 7); k++) {}  // ジッタ
+      j++;
     }
-    total++;
-    prev = in;
+  };
+  uint32_t e[3];
+  measure(100, e);
+  uint32_t expSh = (YM_CLOCK_HZ / 64) * 2 / 10;  // SH1 期待エッジ数/100ms
+  int sh = -1;
+  for (int i = 0; i < 3; i++) {
+    if (e[i] > expSh / 2 && e[i] < expSh * 2) {
+      if (sh < 0 || labs((long)e[i] - (long)expSh) < labs((long)e[sh] - (long)expSh)) sh = i;
+    }
   }
-  int p1 = -1, sh = -1;
-  for (int i = 0; i < 3; i++) {         // φ1: 最速+デューティ50%近辺
-    uint32_t duty = total ? high[i] * 100 / total : 0;
-    if (edges[i] > 15000 && duty > 35 && duty < 65 &&
-        (p1 < 0 || edges[i] > edges[p1])) p1 = i;
-  }
-  for (int i = 0; i < 3; i++) {         // SH1: 55.9kHz パルス(≒11k エッジ)
-    if (i == p1) continue;
-    if (edges[i] > 5000 && edges[i] < 16000 &&
-        (sh < 0 || edges[i] < edges[sh])) sh = i;
+  int p1 = -1;
+  if (sh >= 0) {
+    srWrite32(srCpuAddr(YM_WR_N));            // /IC ホールド
+    delay(2);
+    uint32_t e2[3];
+    measure(50, e2);
+    srWrite32(srCpuAddr(YM_WR_N | YM_IC_N));  // /IC 解除
+    delay(2);
+    int a = (sh == 0) ? 1 : 0, b = (sh == 2) ? 1 : 2;
+    if (e2[a] > 1000 || e2[b] > 1000) p1 = (e2[a] > e2[b]) ? a : b;
   }
   if (p1 >= 0 && sh >= 0) {
     int so = 3 - p1 - sh;
@@ -437,11 +459,8 @@ static void ymAudioStart() {
     ymMaskSO = 1UL << cand[so];
     Serial.printf("YMMAP phi1=MD%d sh1=MD%d so=MD%d\n", cand[p1]-4, cand[sh]-4, cand[so]-4);
   } else {
-    Serial.printf("YMMAP DEFAULT (edges %lu/%lu/%lu duty %lu/%lu/%lu%%)\n",
-                  (unsigned long)edges[0], (unsigned long)edges[1], (unsigned long)edges[2],
-                  (unsigned long)(total ? high[0]*100/total : 0),
-                  (unsigned long)(total ? high[1]*100/total : 0),
-                  (unsigned long)(total ? high[2]*100/total : 0));
+    Serial.printf("YMMAP UNCHANGED (edges %lu/%lu/%lu)\n",
+                  (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2]);
   }
 
   ledcAttach(PIN_PWM_OUT, PWM_FREQ, PWM_RES);
@@ -695,6 +714,7 @@ void setup() {
   // (disableCore0WDT は core 3.x でログを吐き続けるので deinit を使う)。
   esp_task_wdt_deinit();
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
+  Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
   ledReady();               // 電源ON = 緑
 }
@@ -879,6 +899,44 @@ void loop() {
       case 'D':
         ymDiag();
         break;
+      // MDX 等のレジスタイベントストリーム再生。
+      // "XSTART" 応答後、4バイトレコード [dt_lo][dt_hi][addr][data] を受信。
+      //   dt: 直前イベントからの遅延 (100µs単位)。addr=0xFE は遅延のみ。
+      //   dt=0xFFFF & addr=0xFF & data=0xFF で終了 -> "XDONE"
+      // タイミングはファーム側で目標時刻方式で刻む(ホストはバッファを
+      // 切らさず送るだけ。USB CDC のフロー制御が自然なペーシングになる)。
+      case 'X': {
+        if (!ymClockOn) ymInit();
+        Serial.print("XSTART\n");
+        ledBusy();
+        uint32_t next = micros();
+        uint32_t consumed = 0;   // フロー制御: 1KB 消費ごとに 'K' を返す
+        for (;;) {
+          uint8_t rec[4];
+          int got = 0;
+          uint32_t tw = millis();
+          while (got < 4) {
+            if (Serial.available()) { rec[got++] = Serial.read(); tw = millis(); }
+            else if (millis() - tw > 5000) { got = -1; break; }
+          }
+          if (got < 0) { Serial.print("XTIMEOUT\n"); break; }
+          consumed += 4;
+          if (consumed >= 1024) { consumed -= 1024; Serial.write('K'); }
+          uint16_t dt = rec[0] | ((uint16_t)rec[1] << 8);
+          if (dt == 0xFFFF && rec[2] == 0xFF && rec[3] == 0xFF) {
+            Serial.print("XDONE\n");
+            break;
+          }
+          next += (uint32_t)dt * 100;
+          while ((int32_t)(next - micros()) > 0) {
+            if ((int32_t)(next - micros()) > 2000) delay(1);
+          }
+          if (rec[2] != 0xFE) ymWriteReg(rec[2], rec[3]);
+        }
+        for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);  // 全chキーオフ
+        ledReady();
+        break;
+      }
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
   }
