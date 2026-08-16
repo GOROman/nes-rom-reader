@@ -308,8 +308,8 @@ static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 // φM は Arduino の ledcAttach だと 3.58MHz 設定が静かに失敗することがあるため、
 // ESP-IDF の API で APB 80MHz ソースを明示して設定する。
 // タイマー3/チャネル7 を専有(Arduino 側の自動割り当てと衝突させない)。
-static void ymClockStart() {
-  if (ymClockOn) return;
+static bool ymClockStart() {
+  if (ymClockOn) return true;
   // LEDC は全タイマーでクロック源を共有し、Arduino の ledcAttach(音声PWM側)は
   // XTAL(40MHz) を選ぶため、φM 側も明示的に XTAL に合わせる。
   // 2bit 分解能で分周比 40M/(3.579545M×4)=2.79 → 実周波数 ≒3.580MHz。
@@ -333,9 +333,11 @@ static void ymClockStart() {
   ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
   uint32_t fr = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
   Serial.printf("YMCLK freq=%lu (target %lu)\n", (unsigned long)fr, (unsigned long)YM_CLOCK_HZ);
-  if (e1 != ESP_OK || e2 != ESP_OK || fr == 0)
-    Serial.printf("ERR YM_CLOCK timer=%d ch=%d\n", (int)e1, (int)e2);
-  ymClockOn = true;
+  bool ok = (e1 == ESP_OK && e2 == ESP_OK && fr != 0);
+  if (!ok)
+    Serial.printf("ERR YM_CLOCK timer=%d ch=%d freq=%lu\n", (int)e1, (int)e2, (unsigned long)fr);
+  ymClockOn = ok;   // 失敗時はYMモードに入らない(F は ERR を返す)
+  return ok;
 }
 
 // --- YM3012 シミュレーション ---
@@ -421,11 +423,14 @@ static void ymCaptureLoop(void*) {
           // フル精度(16bit相当)でデコードし、1次ノイズシェーピング
           // (量子化誤差の繰り越し)で 9bit PWM へ落とす。量子化ノイズが
           // 高域に移り、後段の RC フィルタで削れるので実効 S/N が上がる。
-          int32_t pcm = (v << 6) >> (7 - (e ? e : 1));   // ±32704 (16bit相当)
+          // v*64: 負数の << は未定義動作なので乗算で書く
+          int32_t pcm = (v * 64) >> (7 - (e ? e : 1));   // ±32704 (16bit相当)
           int32_t acc = (pcm + 32768) + nsErr;
           int32_t duty = acc >> 7;                        // 16bit -> 9bit
           if (duty < 0) duty = 0; else if (duty > 511) duty = 511;
           nsErr = acc - (duty << 7);
+          // アンチワインドアップ: クリップ中に誤差が無限に溜まるのを防ぐ
+          if (nsErr > 127) nsErr = 127; else if (nsErr < -128) nsErr = -128;
           // LEDC レジスタ直叩き(関数呼び出しだと次フレームの φ1 を落とす)
           ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, duty);
           ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, true);
@@ -647,12 +652,12 @@ static void ymDiag() {
                 (unsigned long)pwmEdges);
 }
 
-static void ymInit();       // 前方宣言
+static bool ymInit();       // 前方宣言
 static void ymWriteReg(uint8_t reg, uint8_t val);
 
 // 内蔵曲(ys2_song.h)を1回再生する。シリアル入力で中断。
 static void playEmbedded() {
-  if (!ymClockOn) ymInit();
+  if (!ymClockOn && !ymInit()) { ledError(); return; }
   ledBusy();
   uint32_t next = micros();
   const uint8_t *p = YS2_SONG;
@@ -701,14 +706,16 @@ static void ymWriteReg(uint8_t reg, uint8_t val) {
 }
 
 // φM 供給開始 + /IC リセット。YM2151 はリセット中もクロックが必要。
-static void ymInit() {
+// クロック設定に失敗したら false を返し、YMモードには入らない。
+static bool ymInit() {
   busIdle();
-  ymClockStart();
+  if (!ymClockStart()) return false;
   srWrite32(srCpuAddr(YM_WR_N));           // /IC=L (A10=0)、/WR=H
   delay(2);                                // 最低 100µs 以上
   srWrite32(srCpuAddr(YM_WR_N | YM_IC_N)); // /IC 解除
   delay(2);
   ymAudioStart();                          // YM3012 シミュレーション開始
+  return true;
 }
 
 // デモ: ch0 にシンプルな音色(CON=7, キャリア1個)を組んで
@@ -947,8 +954,8 @@ void loop() {
       case 'P': Serial.print("ERR NEEDS_REV2\n"); break;
 #endif
       case 'F':
-        ymInit();
-        Serial.print("YMRDY\n");
+        if (ymInit()) Serial.print("YMRDY\n");
+        else { Serial.print("ERR YMCLOCK\n"); ledError(); }
         break;
       case 'Y':
         if (!ymClockOn) { Serial.print("ERR YM_NOT_INIT\n"); ledError(); break; }
@@ -984,7 +991,7 @@ void loop() {
       // タイミングはファーム側で目標時刻方式で刻む(ホストはバッファを
       // 切らさず送るだけ。USB CDC のフロー制御が自然なペーシングになる)。
       case 'X': {
-        if (!ymClockOn) ymInit();
+        if (!ymClockOn && !ymInit()) { Serial.print("ERR YMCLOCK\n"); ledError(); break; }
         Serial.print("XSTART\n");
         ledBusy();
         uint32_t next = micros();
