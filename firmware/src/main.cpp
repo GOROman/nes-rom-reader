@@ -371,10 +371,13 @@ static const int PIN_YM_SH1  = 5;   // MD1
 static const int PIN_YM_PHI1 = 6;   // MD2
 static const int PIN_YM_SH2  = 7;   // MD3 (SH2=LEFTch。CHR ROM pin14 経由、固定割り当て)
 // PWM 音声出力はカートリッジへ向かう空き制御線2本を転用する(基板側の配線が不要):
-//   R = PPU /RD (G2) → 541 → エッジ17 → CHR ROM pin 22
-//   L = PPU /WR (G3) → 541 → エッジ47(フィンガー)
+//   R = PPU /RD (G2)  → 541 → エッジ17 → CHR ROM pin 22 の基板側パッド
+//       ※要 CHR ROM pin 22(/OE)の足上げ。しないと PWM で ROM が
+//         バスに出てきて YM の信号と衝突する(実測で確認済み)
+//   L = /ROMSEL (G41) → 541 → エッジ44 → PRG ROM pin 20 のカット箇所エッジ側
+//       (/CS=GND 化により /ROMSEL は完全に未使用。カットは施工済み)
 static const int PIN_PWM_R = PIN_PPU_RD;
-static const int PIN_PWM_L = PIN_PPU_WR;
+static const int PIN_PWM_L = PIN_ROMSEL;
 // 78.125kHz / 9bit (80MHz / 512 / 2)。LEDC は分周比2未満を設定できないため
 // 10bit では setup が失敗する(div_param=0)。
 static const uint32_t PWM_FREQ = 78125;
