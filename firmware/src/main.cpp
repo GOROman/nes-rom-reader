@@ -398,6 +398,13 @@ static volatile uint32_t ymFrameCount = 0;    // SH1 立ち下がり総数
 static volatile uint16_t ymLastRaw = 0;       // 最後にラッチした生ワード
 static volatile uint16_t ymP1Min = 0xFFFF, ymP1Max = 0;  // フレームあたり φ1 エッジ数
 static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
+static volatile uint32_t ymSampleCountL = 0;  // LEFT ch(SH2)で採用したワード数
+static volatile uint16_t ymLastRawL = 0;
+static volatile int ymLOff = 0;   // L デコードのビットオフセット (-3..+3、O コマンドで調整)
+static volatile int ymROff = 0;   // R 側も同様に調整可能
+static volatile uint32_t ymRawBuf[64];  // R ラッチ時の生シフトレジスタ(G コマンドでダンプ)
+static volatile uint8_t ymRawIdx = 0;
+static volatile int16_t ymDutyMinL = 32767, ymDutyMaxL = -32768;
 
 // Core 0 の専用タスク。φ1(=φM/2、4MHz時2MHz)をポーリングでエッジ検出する。
 // 割り込みは許可したままなので tick 等で稀にビットを落とすが、
@@ -422,9 +429,7 @@ static void ymCaptureLoop(void*) {
   }
   // 13bitワード(sr)→ 9bit デューティ。フル精度デコード+1次ノイズシェーピング。
   // 量子化ノイズが高域に移り、後段の RC フィルタで削れるので実効 S/N が上がる。
-  auto decodeDuty = [](uint16_t sr, int32_t &nsErr) -> int32_t {
-    uint16_t m = (sr >> 3) & 0x3FF;               // 仮数 (B0 が LSB、B9=符号)
-    uint16_t e = (sr >> 13) & 0x07;               // 指数 (S0 が LSB)
+  auto decodeDuty = [](uint16_t m, uint16_t e, int32_t &nsErr) -> int32_t {
     int32_t v = (int32_t)m - 512;                 // -512..+511
     int32_t pcm = (v * 64) >> (7 - (e ? e : 1));  // ±32704 (16bit相当)。負数<<はUBなので乗算
     int32_t acc = (pcm + 32768) + nsErr;
@@ -442,7 +447,7 @@ static void ymCaptureLoop(void*) {
     const uint32_t P1  = 1UL << (PIN_YM_PHI1 - 4);
     const uint32_t SH2 = 1UL << (PIN_YM_SH2 - 4);
     uint32_t prev = dedic_gpio_cpu_ll_read_in();
-    uint16_t sr = 0;
+    uint32_t sr = 0;   // 32bit シフトレジスタ(Lのオフセット実験用に余裕を持たせる)
     // 割り込みは止めない(IWDT/クラッシュ回避)。tick 等でビットを落とした
     // 区間は φ1 エッジ数の検証で検出して捨てる(直前デューティ保持=聴感上無音)。
     // ステレオ時は SH2→SH1 間が16クロック。SH2未配線(モノラル)なら
@@ -453,7 +458,7 @@ static void ymCaptureLoop(void*) {
       uint32_t in = dedic_gpio_cpu_ll_read_in();
       uint32_t chg = in ^ prev;
       if ((chg & P1) && (in & P1)) {          // φ1 立ち上がり: SO を取り込み
-        sr = (sr >> 1) | ((in & SO) ? 0x8000 : 0);
+        sr = (sr >> 1) | ((in & SO) ? 0x80000000UL : 0);
         cnt++;
       }
       if ((chg & SH) && !(in & SH)) {         // SH1 立ち下がり = RIGHT ch 確定
@@ -461,12 +466,16 @@ static void ymCaptureLoop(void*) {
         if (cnt < ymP1Min) ymP1Min = cnt;
         if (cnt > ymP1Max) ymP1Max = cnt;
         if ((cnt >= 15 && cnt <= 17) || (cnt >= 29 && cnt <= 33)) {
-          int32_t duty = decodeDuty(sr, nsErrR);
+          int kr = ymROff;
+          uint16_t m = (sr >> (19 - kr)) & 0x3FF; // 仮数 (B0 が LSB、B9=符号)
+          uint16_t e = (sr >> (29 - kr)) & 0x07;  // 指数 (S0 が LSB)
+          int32_t duty = decodeDuty(m, e, nsErrR);
           ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
           ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
           ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
           ymSampleCount++;
-          ymLastRaw = sr;
+          ymLastRaw = (uint16_t)(sr >> 16);
+          ymRawBuf[ymRawIdx++ & 63] = sr;
           if (duty < ymDutyMin) ymDutyMin = duty;
           if (duty > ymDutyMax) ymDutyMax = duty;
         }
@@ -474,10 +483,17 @@ static void ymCaptureLoop(void*) {
       }
       if ((chg & SH2) && !(in & SH2)) {       // SH2 立ち下がり = LEFT ch 確定
         if (cnt >= 15 && cnt <= 17) {
-          int32_t duty = decodeDuty(sr, nsErrL);
+          int k = ymLOff;                         // SH2 の位相差補正 (O コマンド)
+          uint16_t m = (sr >> (19 - k)) & 0x3FF;
+          uint16_t e = (sr >> (29 - k)) & 0x07;
+          int32_t duty = decodeDuty(m, e, nsErrL);
           ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
           ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
           ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
+          ymSampleCountL++;
+          ymLastRawL = (uint16_t)(sr >> 16);
+          if (duty < ymDutyMinL) ymDutyMinL = duty;
+          if (duty > ymDutyMaxL) ymDutyMaxL = duty;
         }
         cnt = 0;
       }
@@ -555,7 +571,10 @@ static void ymDiag() {
                 (unsigned long)ymSampleCount, (unsigned long)ymFrameCount,
                 ymP1Min, ymP1Max, ymLastRaw,
                 ymDutyMin, ymDutyMax);
+  Serial.printf("DIAG L: samples=%lu last=%04X duty=%d..%d\n",
+                (unsigned long)ymSampleCountL, ymLastRawL, ymDutyMinL, ymDutyMaxL);
   ymDutyMin = 32767; ymDutyMax = -32768;   // 次回に向けてリセット
+  ymDutyMinL = 32767; ymDutyMaxL = -32768;
   ymP1Min = 0xFFFF; ymP1Max = 0;
 
   // MD0-7(PPU データバス 8本)全部のエッジ数。SO/SH1/φ1 が想定外の
@@ -990,6 +1009,26 @@ void loop() {
       case 'D':
         ymDiag();
         break;
+      // L チャンネルのデコード位置調整(SH2 位相差の実験用)。
+      // O <hex 0-6> -> オフセット -3..+3 を設定し "LOFF n" を返す
+      // R ラッチ時の生ワード64個をダンプ(アライメント解析用)
+      case 'G': {
+        for (int i = 0; i < 64; i++) {
+          Serial.printf("%08lX%c", (unsigned long)ymRawBuf[i], (i % 8 == 7) ? '\n' : ' ');
+        }
+        Serial.print("GDONE\n");
+        break;
+      }
+      case 'O': {
+        int offL = (int)(addr & 7) - 3;
+        int offR = (int)(len & 7) - 3;
+        if (offL < -3) offL = -3; if (offL > 3) offL = 3;
+        if (offR < -3) offR = -3; if (offR > 3) offR = 3;
+        ymLOff = offL;
+        ymROff = offR;
+        Serial.printf("LOFF %d ROFF %d\n", offL, offR);
+        break;
+      }
       // 内蔵曲(ys2_song.h)のスタンドアロン再生。USB 通信を一切使わないので、
       // ストリーミング再生との比較で「再生中の再起動」の切り分けにも使う。
       // 途中で止めるには何かコマンドを送る。
