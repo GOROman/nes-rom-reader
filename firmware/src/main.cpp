@@ -23,6 +23,10 @@
 //   Q                      -> YM2151 デモ(ドレミファソラシドをループ再生)。
 //                             次のコマンド受信で停止し "YMDEMO DONE\n"
 //
+// スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
+// 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
+// 通常のダンパー動作へ復帰する(その入力は普通のコマンドとして処理される)。
+//
 // YM2151 は docs/ym2151.md の通り「アドレスバス経由」でカートリッジへ接続する:
 //   D0-7=CPU A0-A7  A0=CPU A8  /WR=CPU A9  /IC=CPU A10  /CS=GND  /RD=+5V
 //   φM=M2ピン(LEDC PWM 3.579545MHz に切替)
@@ -299,6 +303,15 @@ static void ymClockStart() {
   ymClockOn = true;
 }
 
+// φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
+static void ymClockStop() {
+  if (!ymClockOn) return;
+  ledcDetach(PIN_M2);
+  ymClockOn = false;
+  pinMode(PIN_M2, OUTPUT);
+  digitalWrite(PIN_M2, HIGH);
+}
+
 // BUSY は読めないので最悪値で待つ。BUSY 期間は φM 68サイクル ≒ 19µs。
 static void ymWaitBusy() { delayMicroseconds(30); }
 
@@ -493,6 +506,26 @@ static void handleRead(char region, uint32_t addr, uint32_t len) {
 }
 
 void loop() {
+  // スタンドアロン自動演奏: 電源ONから2秒間シリアル入力がなければ
+  // YM2151 を初期化してデモをループ再生する。シリアル入力(=最初のコマンド)で
+  // 演奏を止め、φM も停止して通常のダンパー動作へ完全復帰する。
+  static bool autoPlayChecked = false;
+  if (!autoPlayChecked) {
+    if (Serial.available()) {
+      autoPlayChecked = true;          // ホストが先に喋った → 通常モード
+    } else if (millis() > 2000) {
+      autoPlayChecked = true;
+      ymInit();
+      ledBusy();
+      ymDemo();                        // シリアル入力が来るまで演奏
+      ymClockStop();                   // M2 を GPIO に戻す
+      busIdle();
+      ledReady();
+    } else {
+      return;
+    }
+  }
+
   static String line;
   while (Serial.available()) {
     char c = Serial.read();
