@@ -23,6 +23,7 @@ def load(path):
 # 可変長・未対応コマンドのスキップ長 (コマンドバイトを除くパラメータ長)
 SKIP = {}
 for c in range(0x30, 0x40): SKIP[c] = 1          # 予約(1byte)
+for c in range(0x40, 0x4F): SKIP[c] = 2          # Mikey等(2byte)
 for c in (0x4F, 0x50): SKIP[c] = 1               # GG/PSG
 for c in range(0x51, 0x60): SKIP[c] = 2          # 各種FM(2byte) ※0x54は別処理
 for c in range(0xA0, 0xC0): SKIP[c] = 2          # AY/OKIM6258(0xB7)等
@@ -39,7 +40,7 @@ def convert(data):
         ofs = 0x34 + struct.unpack_from("<I", data, 0x34)[0]
     else:
         ofs = 0x40
-    clk = struct.unpack_from("<I", data, 0x30)[0]
+    clk = struct.unpack_from("<I", data, 0x30)[0] & 0x3FFFFFFF
     print(f"# YM2151 clock in VGM: {clk} Hz", file=sys.stderr)
 
     events = []
@@ -64,6 +65,8 @@ def convert(data):
         elif c == 0x67:                     # data block: 66 tt ss ss ss ss + data
             size = struct.unpack_from("<I", data, i + 3)[0]
             i += 7 + size
+        elif c == 0x68:                     # PCM RAM write: 12バイト固定
+            i += 12
         elif 0x80 <= c <= 0x8F:             # YM2612 PCM+wait (来ないはずだが安全に)
             t_samples += (c & 15); i += 1
         elif c in SKIP:
@@ -77,8 +80,13 @@ def convert(data):
 def main():
     src = sys.argv[1]
     dst = sys.argv[2] if len(sys.argv) > 2 else None
-    events = convert(load(src))
+    data = load(src)
+    events = convert(data)
+    if not events:
+        raise SystemExit("no YM2151 events found")
+    clk = struct.unpack_from("<I", data, 0x30)[0] & 0x3FFFFFFF
     out = open(dst, "w") if dst else sys.stdout
+    out.write(f"#clock {clk}\n")   # mdxplay がピッチ補正に利用
     for t, a, d in events:
         out.write(f"{t} {a} {d}\n")
     print(f"# {len(events)} events, {events[-1][0]/1e6:.1f}s", file=sys.stderr)

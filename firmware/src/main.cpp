@@ -400,7 +400,7 @@ static volatile uint16_t ymP1Min = 0xFFFF, ymP1Max = 0;  // フレームあた�
 static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
 static volatile uint32_t ymSampleCountL = 0;  // LEFT ch(SH2)で採用したワード数
 static volatile uint16_t ymLastRawL = 0;
-static volatile int ymLOff = 0;   // L デコードのビットオフセット (-3..+3、O コマンドで調整)
+static volatile int ymLOff = 0;   // L デコードのビットオフセット (-2..+3、O コマンドで調整)
 static volatile int ymROff = 0;   // R 側も同様に調整可能
 static volatile uint32_t ymRawBuf[64];  // R ラッチ時の生シフトレジスタ(G コマンドでダンプ)
 static volatile uint8_t ymRawIdx = 0;
@@ -434,8 +434,8 @@ static void ymCaptureLoop(void*) {
   // 13bitワード(sr)→ 9bit デューティ。フル精度デコード+1次ノイズシェーピング。
   // 量子化ノイズが高域に移り、後段の RC フィルタで削れるので実効 S/N が上がる。
   auto decodeDuty = [](uint16_t m, uint16_t e, int32_t &nsErr) -> int32_t {
-    int32_t v = (int32_t)m - 512;                 // -512..+511
-    int32_t pcm = (v * 64) >> (7 - (e ? e : 1));  // ±32704 (16bit相当)。負数<<はUBなので乗算
+    int32_t v = 2 * (int32_t)m - 1023;            // ±1023 (YM3012式の半LSB中心化)
+    int32_t pcm = (v * 32) >> (7 - (e ? e : 1));  // ±32736 (16bit相当)。負数<<はUBなので乗算
     int32_t acc = (pcm + 32768) + nsErr;
     int32_t duty = acc >> 7;                      // 16bit -> 9bit
     if (duty < 0) duty = 0; else if (duty > 511) duty = 511;
@@ -537,7 +537,7 @@ static void ymCaptureLoop(void*) {
 }
 
 static void ymAudioStart() {
-  digitalWrite(PIN_OE_CHR, LOW);        // U7 有効化 → SO/SH1/φ1 が G4-G6 に届く
+  digitalWrite(PIN_OE_CHR, LOW);        // U7 有効化 → φ1/SO/SH1/SH2 が G4-G8 に届く
   delayMicroseconds(10);
 
   // 信号割り当ては配線固定(PIN_YM_* 参照)。自動判別は廃止。
@@ -755,7 +755,7 @@ static void ymClockStop() {
 static void ymWaitBusy() { delayMicroseconds(20); }  // BUSY=68φM≒17µs@4MHz
 
 // データと A0 をアドレス線に確定させ、A9 で /WR パルスを作る。
-// セットアップ/ホールドは srWrite32 の所要時間(数十µs)で自然に満たされる。
+// セットアップ/ホールドは srWrite32 の所要時間(数µs)で自然に満たされる。
 static void ymWriteBus(bool a0, uint8_t v) {
   uint16_t base = (uint16_t)v | (a0 ? 0x100 : 0) | YM_IC_N;
   srWrite32(srCpuAddr(base | YM_WR_N));  // データ確定、/WR=H
@@ -1054,10 +1054,13 @@ void loop() {
       // R ラッチ時の生ワード64個をダンプ(アライメント解析用)。
       // 通常再生の負荷を避けるため、Gを受けた時だけ64サンプル記録する
       case 'G': {
+        ymRawIdx = 0;      // 0..63 の時系列順で埋まるようリセットしてからアーム
         ymRawArm = 64;
-        delay(50);   // 62.5kHz なら64サンプルは約1msで揃う
+        delay(50);         // 62.5kHz なら64サンプルは約1msで揃う
+        uint32_t snap[64]; // 表示中の上書きを防ぐスナップショット
+        for (int i = 0; i < 64; i++) snap[i] = ymRawBuf[i];
         for (int i = 0; i < 64; i++) {
-          Serial.printf("%08lX%c", (unsigned long)ymRawBuf[i], (i % 8 == 7) ? '\n' : ' ');
+          Serial.printf("%08lX%c", (unsigned long)snap[i], (i % 8 == 7) ? '\n' : ' ');
         }
         Serial.print("GDONE\n");
         break;
@@ -1070,8 +1073,9 @@ void loop() {
       case 'O': {
         int offL = (int)(addr & 7) - 3;
         int offR = (int)(len & 7) - 3;
-        if (offL < -3) offL = -3; if (offL > 3) offL = 3;
-        if (offR < -3) offR = -3; if (offR > 3) offR = 3;
+        // -3 だと 29-(-3)=32 の右シフトが未定義動作になるため -2 までに制限
+        if (offL < -2) offL = -2; if (offL > 3) offL = 3;
+        if (offR < -2) offR = -2; if (offR > 3) offR = 3;
         ymLOff = offL;
         ymROff = offR;
         Serial.printf("LOFF %d ROFF %d\n", offL, offR);

@@ -84,16 +84,25 @@ def main():
     args = ap.parse_args()
 
     events = []
+    src_clock = 4000000.0        # 既定: MDX(X68000)=4MHz 前提
     with open(args.evt) as f:
         for line in f:
+            if line.startswith("#"):
+                if line.startswith("#clock"):
+                    src_clock = float(line.split()[1])   # vgm2evt が記録した元クロック
+                continue
             t, a, d = line.split()
             events.append((int(t), int(a), int(d)))
-    print(f"{len(events)} events, {events[-1][0]/1e6:.1f} s")
+    if not events:
+        sys.exit("no events in input")
+    print(f"{len(events)} events, {events[-1][0]/1e6:.1f} s, src_clock={src_clock:.0f}")
 
     offset64 = 0
     if not args.no_tune:
-        offset64 = round(768 * math.log2(4000000.0 / args.tune))
-        print(f"pitch offset: {offset64} (1/64 semitone)")
+        # 元クロック(曲が前提とするφM)と実チップ(--tune)の差を KC/KF で補正
+        offset64 = round(768 * math.log2(src_clock / args.tune))
+        if offset64:
+            print(f"pitch offset: {offset64} (1/64 semitone)")
     events = transform_events(events, offset64)
     if args.monomix:
         # レジスタ $20-$27 の bit7-6 (RL出力イネーブル) を両ONに強制
@@ -103,24 +112,38 @@ def main():
     print(f"stream: {len(data)} bytes")
 
     s = serial.Serial(args.port, 115200, timeout=5)
-    time.sleep(0.8)                 # ポートオープンでリセットが掛かる場合の猶予
-
-  # ループ対応: 1周分の送信処理を繰り返す
-    while True:
-        play_once(s, data, events)
-        if not args.loop:
-            break
-        time.sleep(2)
-    s.close()
+    try:
+        time.sleep(0.8)             # ポートオープンでリセットが掛かる場合の猶予
+        # ループ対応: 1周分の送信処理を繰り返す。XDONE未受信(異常)なら継続しない
+        while True:
+            if not play_once(s, data, events):
+                print("playback did not complete; stopping loop")
+                break
+            if not args.loop:
+                break
+            time.sleep(2)
+    except KeyboardInterrupt:
+        # X モード中断: 終端レコードを送って全chキーオフさせる
+        try:
+            s.write(struct.pack("<HBB", 0xFFFF, 0xFF, 0xFF))
+            s.timeout = 3
+            s.readline()
+        except Exception:
+            pass
+        print("\ninterrupted (keyoff sent)")
+    finally:
+        s.close()
 
 
 def play_once(s, data, events):
+    """1周ストリーミングする。XDONE 受信で True。"""
+    s.timeout = 5                  # 前周で変更した値を戻す
     s.reset_input_buffer()
     s.write(b"X\n")
     while True:
         line = s.readline()
         if not line:
-            print("no XSTART (timeout)"); sys.exit(1)
+            print("no XSTART (timeout)"); return False
         print(line.decode(errors="replace").strip())
         if b"XSTART" in line:
             break
@@ -144,17 +167,19 @@ def play_once(s, data, events):
         if b == b"K":
             inflight -= 1024
         elif b == b"":
-            print("flow-control timeout"); sys.exit(1)
+            print("flow-control timeout"); return False
         # 'K' 以外(XTIMEOUT等のテキスト)はそのまま読み飛ばし
     print(f"sent in {time.time()-t0:.1f}s, playing to end...")
     s.timeout = events[-1][0] / 1e6 + 15   # 曲長+マージンまで XDONE を待つ
     while True:
         line = s.readline()
         if not line:
-            print("(no response)"); break
+            print("(no response)"); return False
         print(line.decode(errors="replace").strip())
-        if b"XDONE" in line or b"XTIMEOUT" in line:
-            break
+        if b"XDONE" in line:
+            return True
+        if b"XTIMEOUT" in line:
+            return False
 
 
 if __name__ == "__main__":
