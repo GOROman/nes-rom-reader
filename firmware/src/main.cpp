@@ -1,7 +1,7 @@
 // nes-rom-reader firmware (M5Stamp S3)
 //
 // ホストとはUSB CDCで通信。プロトコル(1行コマンド、応答はバイナリ):
-//   V                      -> "famidump v0.5 rev<基板リビジョン>\n"
+//   V                      -> "famidump v0.6 rev<基板リビジョン>\n"
 //   R <addr_hex> <len_hex> -> PRG読み出し。"OK <len>\n" + 生データ + "CRC xxxxxxxx\n"
 //   C <addr_hex> <len_hex> -> CHR読み出し。同上
 //   M                      -> ミラーリング判定 "H\n" or "V\n" or "?\n"
@@ -17,6 +17,15 @@
 //                             バスコンフリクトを利用するため、addr には
 //                             「選びたいバンク番号と同じ値が入っているPRGアドレス」
 //                             を指定する(ホスト側でPRGダンプから検索)。
+//   F                      -> YM2151 初期化(φM 3.579545MHz 供給開始 + /IC リセット)。
+//                             "YMRDY st=xx\n" を返す。基板v0.2(またはU6 DIRジャンパ改造)のみ。
+//   Y <reg_hex> <val_hex>  -> YM2151 レジスタ書き込み。"YMOK rr vv\n"
+//   Q                      -> YM2151 デモ(テストトーン)。"YMDEMO DONE\n"
+//
+// YM2151 は docs/ym2151.md の通りカートリッジバスへ接続する:
+//   D0-7=CD0-7(U6 B側) /CS=/ROMSEL /WR=CPU R/W /RD=PPU /RD /IC=PPU /WR
+//   A0=CPU A0 φM=M2ピン(LEDC PWM 3.579545MHz に切替)
+// F 実行後はカートリッジ用コマンド(R/C/W/P/B)と併用しないこと。
 //
 // データブロック直後の "CRC xxxxxxxx\n" は生データの CRC32
 // (IEEE 802.3 / zlib.crc32 互換、8桁大文字hex)。ホスト側で照合する。
@@ -248,15 +257,118 @@ static char detectMirroring() {
   return '?';  // 4画面 or 未接続
 }
 
+// YM モード中は M2 ピンが LEDC で φM を出力しているため、
+// digitalWrite で GPIO に戻してしまわないようガードする。
+static bool ymClockOn = false;
+
 static void busIdle() {
   digitalWrite(PIN_OE_PRG, HIGH);
   digitalWrite(PIN_OE_CHR, HIGH);
   digitalWrite(PIN_ROMSEL, HIGH);
-  digitalWrite(PIN_M2, HIGH);
+  if (!ymClockOn) digitalWrite(PIN_M2, HIGH);
   digitalWrite(PIN_RW, HIGH);
   digitalWrite(PIN_PPU_RD, HIGH);
   digitalWrite(PIN_PPU_WR, HIGH);
 }
+
+// --- YM2151 (基板 v0.2 / U6 DIRジャンパ改造 v0.1 のみ) ---
+//
+// カートリッジバスの信号を流用して YM2151 を駆動する。制御線は 74HCT541 で
+// 5V 化され、データは U6(A→B時3.3V駆動)経由。YM2151 の入力は TTL 互換
+// (VIH=2.0V) なので 3.3V 駆動で足りる。
+#if BOARD_REV >= 2
+static const uint32_t YM_CLOCK_HZ = 3579545;  // φM: NTSC カラーバースト
+
+static void ymClockStart() {
+  if (ymClockOn) return;
+  ledcAttach(PIN_M2, YM_CLOCK_HZ, 4);  // 4bit分解能 → 80MHz/16 = 5MHz まで
+  ledcWrite(PIN_M2, 8);                // duty 8/16 ≒ 50%
+  ymClockOn = true;
+}
+
+// YM2151 ステータス読み出し(bit7 = BUSY)。/CS + /RD で YM が CD バスへ出力し、
+// U6 を B→A(既定方向)で通して読む。
+static uint8_t ymReadStatus() {
+  releaseDataBus();
+  digitalWrite(PIN_BUS_DIR, LOW);
+  digitalWrite(PIN_ROMSEL, LOW);   // /CS
+  digitalWrite(PIN_PPU_RD, LOW);   // /RD
+  digitalWrite(PIN_OE_PRG, LOW);
+  delayMicroseconds(1);
+  uint8_t v = readDataBus();
+  digitalWrite(PIN_OE_PRG, HIGH);
+  digitalWrite(PIN_PPU_RD, HIGH);
+  digitalWrite(PIN_ROMSEL, HIGH);
+  return v;
+}
+
+// BUSY解除待ち。最悪でも数十µs(68 φMサイクル)で解ける。タイムアウト付き。
+static void ymWaitBusy() {
+  for (int i = 0; i < 100; i++) {
+    if (!(ymReadStatus() & 0x80)) return;
+    delayMicroseconds(2);
+  }
+}
+
+// A0(=CPU A0)とデータを確定させて /CS + /WR パルスを打つ
+static void ymWriteBus(bool a0, uint8_t v) {
+  srWrite32(srCpuAddr(a0 ? 1 : 0));
+  digitalWrite(PIN_OE_PRG, HIGH);
+  digitalWrite(PIN_BUS_DIR, HIGH);  // A→B: MCU が YM を駆動
+  driveDataBus(v);
+  digitalWrite(PIN_OE_PRG, LOW);
+  delayMicroseconds(1);
+  digitalWrite(PIN_ROMSEL, LOW);    // /CS
+  digitalWrite(PIN_RW, LOW);        // /WR (tWW min 100ns は GPIO 速度で十分満たす)
+  delayMicroseconds(1);
+  digitalWrite(PIN_RW, HIGH);       // /WR 立ち上がりで取り込み
+  digitalWrite(PIN_ROMSEL, HIGH);
+  digitalWrite(PIN_OE_PRG, HIGH);
+  releaseDataBus();
+  digitalWrite(PIN_BUS_DIR, LOW);
+}
+
+static void ymWriteReg(uint8_t reg, uint8_t val) {
+  ymWaitBusy();
+  ymWriteBus(false, reg);   // A0=0: アドレス
+  ymWaitBusy();
+  ymWriteBus(true, val);    // A0=1: データ
+}
+
+// φM 供給開始 + /IC リセット。YM2151 はリセット中もクロックが必要。
+static void ymInit() {
+  busIdle();
+  ymClockStart();
+  digitalWrite(PIN_PPU_WR, LOW);   // /IC アサート
+  delay(2);                        // 最低 100µs 以上
+  digitalWrite(PIN_PPU_WR, HIGH);
+  delay(2);
+}
+
+// デモ: ch0 に単純な矩形波っぽい音色(CON=7, キャリア1個)を組んで
+// A-C#-E-A のアルペジオを鳴らす
+static void ymDemo() {
+  ymWriteReg(0x20, 0xC7);  // ch0: RL=両ch, FB=0, CON=7(全スロット並列)
+  ymWriteReg(0x30, 0x00);  // KF=0
+  for (int op = 0; op < 4; op++) {
+    uint8_t s = 0 + op * 8;               // ch0 のスロットオフセット
+    ymWriteReg(0x40 + s, 0x01);           // DT1=0, MUL=1
+    ymWriteReg(0x60 + s, op == 3 ? 0x10 : 0x7F);  // C2 のみ発音、他は TL 最小
+    ymWriteReg(0x80 + s, 0x1F);           // AR 最速
+    ymWriteReg(0xA0 + s, 0x05);           // D1R
+    ymWriteReg(0xC0 + s, 0x02);           // D2R
+    ymWriteReg(0xE0 + s, 0x1A);           // D1L=1, RR=10
+  }
+  static const uint8_t kc[4] = {0x4A, 0x4E, 0x51, 0x5A};  // A4, C#5, E5, A5
+  for (int i = 0; i < 4; i++) {
+    ymWriteReg(0x28, kc[i]);  // KC
+    ymWriteReg(0x08, 0x78);   // ch0 全スロット KeyOn
+    delay(180);
+    ymWriteReg(0x08, 0x00);   // KeyOff
+    delay(60);
+  }
+}
+#endif  // BOARD_REV >= 2
 
 void setup() {
   for (int i = 0; i < 8; i++) pinMode(PIN_D[i], INPUT);
@@ -272,6 +384,10 @@ void setup() {
   pinMode(PIN_PPU_WR, OUTPUT);
   pinMode(PIN_CIRAM_A10, INPUT);
 #if BOARD_REV >= 2
+  // U6 DIRジャンパ改造基板で外付けプルダウンを省く場合の保険として、
+  // 内部プルダウン(約45kΩ)を有効化してから LOW 駆動に移る。
+  // ※ 電源ON〜ここまでの間は G40 はフローティングなので、常用は外付け10k推奨。
+  pinMode(PIN_BUS_DIR, INPUT_PULLDOWN);
   pinMode(PIN_BUS_DIR, OUTPUT);
   digitalWrite(PIN_BUS_DIR, LOW);  // 既定は B→A(読み出し)
 #endif
@@ -361,7 +477,7 @@ static void handleStatus() {
   bool pins = selfCheckPins(false);
   char m = detectMirroring();
   uint8_t md = readMdFloat();
-  Serial.printf("STATUS famidump-v0.5 mirror=%c pins=%s md=0x%02X\n",
+  Serial.printf("STATUS famidump-v0.6 mirror=%c pins=%s md=0x%02X\n",
                 m, pins ? "PASS" : "FAIL", md);
 }
 
@@ -399,7 +515,7 @@ void loop() {
     sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
     line = "";
     switch (cmd) {
-      case 'V': Serial.printf("famidump v0.5 rev%d\n", BOARD_REV); break;
+      case 'V': Serial.printf("famidump v0.6 rev%d\n", BOARD_REV); break;
       case 'R': handleRead('R', addr, len); break;
       case 'C': handleRead('C', addr, len); break;
       case 'W': handleRead('W', addr, len); break;
@@ -412,8 +528,27 @@ void loop() {
         writeCpu((uint16_t)addr, (uint8_t)len);
         Serial.printf("WROK %04X %02X\n", (unsigned)(addr & 0xFFFF), (unsigned)(len & 0xFF));
         break;
+      case 'F':
+        ymInit();
+        Serial.printf("YMRDY st=%02X\n", ymReadStatus());
+        break;
+      case 'Y':
+        if (!ymClockOn) { Serial.print("ERR YM_NOT_INIT\n"); ledError(); break; }
+        ymWriteReg((uint8_t)addr, (uint8_t)len);
+        Serial.printf("YMOK %02X %02X\n", (unsigned)(addr & 0xFF), (unsigned)(len & 0xFF));
+        break;
+      case 'Q':
+        if (!ymClockOn) { Serial.print("ERR YM_NOT_INIT\n"); ledError(); break; }
+        ledBusy();
+        ymDemo();
+        ledReady();
+        Serial.print("YMDEMO DONE\n");
+        break;
 #else
       case 'P': Serial.print("ERR NEEDS_REV2\n"); break;
+      case 'F':
+      case 'Y':
+      case 'Q': Serial.print("ERR NEEDS_REV2\n"); break;
 #endif
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
