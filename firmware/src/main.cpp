@@ -23,7 +23,7 @@
 //   Q                      -> YM2151 デモ(テストトーン)。"YMDEMO DONE\n"
 //
 // YM2151 は docs/ym2151.md の通り「アドレスバス経由」でカートリッジへ接続する:
-//   D0-7=CPU A1-A8  A0=CPU A0  /WR=CPU R/W  /CS=GND  /RD=+5V  /IC=PPU /WR
+//   D0-7=CPU A0-A7  A0=CPU A8  /WR=CPU R/W  /CS=GND  /RD=+5V  /IC=PPU /WR
 //   φM=M2ピン(LEDC PWM 3.579545MHz に切替)
 // データバスは使わない(74HCT595 が常時駆動するアドレス線にデータを乗せる)ため
 // U6/BUS_DIR の改造が不要で、BUSY は読めないので固定ウェイトで代替する。
@@ -292,9 +292,10 @@ static void ymClockStart() {
 static void ymWaitBusy() { delayMicroseconds(30); }
 
 // アドレス線にデータを確定させて /WR(=CPU R/W) をパルスする。
-// CA0 = YM A0、CA1-CA8 = YM D0-D7。
+// CA0-CA7 = YM D0-D7、CA8 = YM A0(PRG ROM の連続した足 pin3-10 に
+// データ8本を収めるための割り当て)。
 static void ymWriteBus(bool a0, uint8_t v) {
-  srWrite32(srCpuAddr(((uint16_t)v << 1) | (a0 ? 1 : 0)));
+  srWrite32(srCpuAddr((uint16_t)v | (a0 ? 0x100 : 0)));
   delayMicroseconds(1);          // アドレス=データのセットアップ
   digitalWrite(PIN_RW, LOW);     // /WR (幅 min 100ns は GPIO 速度で十分満たす)
   delayMicroseconds(1);
