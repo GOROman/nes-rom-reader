@@ -42,6 +42,7 @@
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
+#include "ys2_song.h"
 #include <hal/gpio_ll.h>
 #include <driver/ledc.h>
 #include <hal/ledc_ll.h>
@@ -639,6 +640,30 @@ static void ymDiag() {
                 (unsigned long)pwmEdges);
 }
 
+static void ymInit();       // 前方宣言
+static void ymWriteReg(uint8_t reg, uint8_t val);
+
+// 内蔵曲(ys2_song.h)を1回再生する。シリアル入力で中断。
+static void playEmbedded() {
+  if (!ymClockOn) ymInit();
+  ledBusy();
+  uint32_t next = micros();
+  const uint8_t *p = YS2_SONG;
+  const uint8_t *end = YS2_SONG + sizeof(YS2_SONG);
+  while (p + 4 <= end && !Serial.available()) {
+    uint16_t dt = p[0] | ((uint16_t)p[1] << 8);
+    if (dt == 0xFFFF && p[2] == 0xFF && p[3] == 0xFF) break;
+    next += (uint32_t)dt * 100;
+    while ((int32_t)(next - micros()) > 0) {
+      if ((int32_t)(next - micros()) > 2000) delay(1);
+    }
+    if (p[2] != 0xFE) ymWriteReg(p[2], p[3]);
+    p += 4;
+  }
+  for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);  // 全chキーオフ
+  ledReady();
+}
+
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
 static void ymClockStop() {
   if (!ymClockOn) return;
@@ -864,6 +889,25 @@ void loop() {
   // スタンドアロン自動演奏: 電源ONから2秒間シリアル入力がなければ
   // YM2151 を初期化してデモをループ再生する。シリアル入力(=最初のコマンド)で
   // 演奏を止め、φM も停止して通常のダンパー動作へ完全復帰する。
+  // 電源ONから2秒以内にシリアル入力がなければ、内蔵曲(Ys2 エンディング2)を
+  // ループ再生する(曲間3秒)。シリアル入力で停止して通常コマンドモードへ。
+  static bool autoPlayChecked = false;
+  if (!autoPlayChecked) {
+    if (Serial.available()) {
+      autoPlayChecked = true;
+    } else if (millis() > 2000) {
+      autoPlayChecked = true;
+      while (!Serial.available()) {
+        playEmbedded();
+        for (int i = 0; i < 30 && !Serial.available(); i++) delay(100);
+      }
+      ymClockStop();
+      busIdle();
+    } else {
+      return;
+    }
+  }
+
   static String line;
   while (Serial.available()) {
     char c = Serial.read();
@@ -879,7 +923,7 @@ void loop() {
     // 実行前に自動で YM モードを解除して通常のダンパー状態へ戻す。
     if (cmd && ymClockOn && strchr("RCWMTSBP", cmd)) ymClockStop();
     switch (cmd) {
-      case 'V': Serial.printf("famidump v0.6 rev%d\n", BOARD_REV); break;
+      case 'V': Serial.printf("famidump v0.6 rev%d rst=%d\n", BOARD_REV, (int)esp_reset_reason()); break;
       case 'R': handleRead('R', addr, len); break;
       case 'C': handleRead('C', addr, len); break;
       case 'W': handleRead('W', addr, len); break;
@@ -917,6 +961,14 @@ void loop() {
         break;
       case 'D':
         ymDiag();
+        break;
+      // 内蔵曲(ys2_song.h)のスタンドアロン再生。USB 通信を一切使わないので、
+      // ストリーミング再生との比較で「再生中の再起動」の切り分けにも使う。
+      // 途中で止めるには何かコマンドを送る。
+      case 'E':
+        Serial.print("ESTART\n");
+        playEmbedded();
+        Serial.print("EDONE\n");
         break;
       // MDX 等のレジスタイベントストリーム再生。
       // "XSTART" 応答後、4バイトレコード [dt_lo][dt_hi][addr][data] を受信。
