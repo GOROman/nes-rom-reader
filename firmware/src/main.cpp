@@ -366,10 +366,15 @@ static bool ymClockStart() {
 // SH1 立ち下がりで直前の13bit(仮数 B0-B9=オフセットバイナリ、指数 S0-S2)を
 // ラッチする。SH1 側 = RIGHT ch のモノラル。フレーム同期は SH1 エッジで
 // 取り直すため、ビット化けしても次のワードで自己復帰する。
-static const int PIN_YM_SO   = 4;   // MD0
-static const int PIN_YM_SH1  = 5;   // MD1
-static const int PIN_YM_PHI1 = 6;   // MD2
-static const int PIN_YM_SH2  = 7;   // MD3 (SH2=LEFTch。CHR ROM pin14 経由、固定割り当て)
+// YM シリアル信号の割り当て(配線固定・実測で確定済み):
+//   φ1  → CHR ROM pin11 (D0) → MD0=G4
+//   SO  → CHR ROM pin12 (D1) → MD1=G5
+//   SH1 → CHR ROM pin13 (D2) → MD2=G6
+//   SH2 → CHR ROM pin15 (D3) → MD3=G7  ※pin14はGNDなので注意
+static const int PIN_YM_PHI1 = 4;   // MD0
+static const int PIN_YM_SO   = 5;   // MD1
+static const int PIN_YM_SH1  = 6;   // MD2
+static const int PIN_YM_SH2  = 7;   // MD3 (SH2=LEFTch)
 // PWM 音声出力はカートリッジへ向かう空き制御線2本を転用する(基板側の配線が不要):
 //   R = PPU /RD (G2)  → 541 → エッジ17 → CHR ROM pin 22 の基板側パッド
 //       ※要 CHR ROM pin 22(/OE)の足上げ。しないと PWM で ROM が
@@ -397,11 +402,8 @@ static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
 // Core 0 の専用タスク。φ1(=φM/2、4MHz時2MHz)をポーリングでエッジ検出する。
 // 割り込みは許可したままなので tick 等で稀にビットを落とすが、
 // SH1 エッジ同期のため次ワードで復帰する(軽微なクラックルのみ)。
-// 実際の配線順に依存しないよう、F 実行時に MD0-2 の信号を測って
-// φ1/SH1/SO の役割を自動判別する(ymAudioStart で設定)。
-static volatile uint32_t ymMaskSO  = 1UL << PIN_YM_SO;
-static volatile uint32_t ymMaskSH  = 1UL << PIN_YM_SH1;
-static volatile uint32_t ymMaskP1  = 1UL << PIN_YM_PHI1;
+// 信号の役割は配線固定(自動判別は起動ごとに揺れて誤判定することが
+// あったため廃止し、実測で確定した割り当てを PIN_YM_* に固定)。
 
 static void ymCaptureLoop(void*) {
   // Dedicated GPIO: G4/G5/G6 を CPU 直結バンドル(bit0/1/2)にして1サイクルで読む。
@@ -432,9 +434,11 @@ static void ymCaptureLoop(void*) {
   };
   for (;;) {
     if (!ymCaptureRun) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-    // GPIOマスク(1<<pin, pin=4..7) → バンドルビット(1<<(pin-4)) へ変換
-    const uint32_t SO = ymMaskSO >> 4, SH = ymMaskSH >> 4, P1 = ymMaskP1 >> 4;
-    const uint32_t SH2 = 1UL << (PIN_YM_SH2 - 4);  // LEFT ch は配線固定
+    // バンドルビット(1<<(pin-4))。割り当ては配線固定
+    const uint32_t SO  = 1UL << (PIN_YM_SO - 4);
+    const uint32_t SH  = 1UL << (PIN_YM_SH1 - 4);
+    const uint32_t P1  = 1UL << (PIN_YM_PHI1 - 4);
+    const uint32_t SH2 = 1UL << (PIN_YM_SH2 - 4);
     uint32_t prev = dedic_gpio_cpu_ll_read_in();
     uint16_t sr = 0;
     // 割り込みは止めない(IWDT/クラッシュ回避)。tick 等でビットを落とした
@@ -484,55 +488,9 @@ static void ymAudioStart() {
   digitalWrite(PIN_OE_CHR, LOW);        // U7 有効化 → SO/SH1/φ1 が G4-G6 に届く
   delayMicroseconds(10);
 
-  // MD0-2 の信号を測って φ1/SH1/SO を自動判別(配線順に依存しない)。
-  //   SH1: サンプルレート由来の固定エッジ数(2×φM/64)で識別
-  //   φ1 vs SO: /IC ホールド中も走り続けるのが φ1
-  // ポーリングと信号周波数のストロボ同期を避けるため計測にジッタを入れる。
-  const int cand[3] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1};
-  auto measure = [&](uint32_t ms, uint32_t* out) {
-    out[0] = out[1] = out[2] = 0;
-    uint32_t prev = REG_READ(GPIO_IN_REG), j = 0;
-    uint32_t t0 = millis();
-    while (millis() - t0 < ms) {
-      uint32_t in = REG_READ(GPIO_IN_REG);
-      uint32_t chg = in ^ prev;
-      for (int i = 0; i < 3; i++)
-        if (chg & (1UL << cand[i])) out[i]++;
-      prev = in;
-      for (volatile uint32_t k = 0; k < (j & 7); k++) {}  // ジッタ
-      j++;
-    }
-  };
-  uint32_t e[3];
-  measure(100, e);
-  uint32_t expSh = (YM_CLOCK_HZ / 64) * 2 / 10;  // SH1 期待エッジ数/100ms
-  int sh = -1;
-  for (int i = 0; i < 3; i++) {
-    if (e[i] > expSh / 2 && e[i] < expSh * 2) {
-      if (sh < 0 || labs((long)e[i] - (long)expSh) < labs((long)e[sh] - (long)expSh)) sh = i;
-    }
-  }
-  int p1 = -1;
-  if (sh >= 0) {
-    srWrite32(srCpuAddr(YM_WR_N));            // /IC ホールド
-    delay(2);
-    uint32_t e2[3];
-    measure(50, e2);
-    srWrite32(srCpuAddr(YM_WR_N | YM_IC_N));  // /IC 解除
-    delay(2);
-    int a = (sh == 0) ? 1 : 0, b = (sh == 2) ? 1 : 2;
-    if (e2[a] > 1000 || e2[b] > 1000) p1 = (e2[a] > e2[b]) ? a : b;
-  }
-  if (p1 >= 0 && sh >= 0) {
-    int so = 3 - p1 - sh;
-    ymMaskP1 = 1UL << cand[p1];
-    ymMaskSH = 1UL << cand[sh];
-    ymMaskSO = 1UL << cand[so];
-    Serial.printf("YMMAP phi1=MD%d sh1=MD%d so=MD%d\n", cand[p1]-4, cand[sh]-4, cand[so]-4);
-  } else {
-    Serial.printf("YMMAP UNCHANGED (edges %lu/%lu/%lu)\n",
-                  (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2]);
-  }
+  // 信号割り当ては配線固定(PIN_YM_* 参照)。自動判別は廃止。
+  Serial.printf("YMMAP fixed: phi1=MD%d so=MD%d sh1=MD%d sh2=MD%d\n",
+                PIN_YM_PHI1 - 4, PIN_YM_SO - 4, PIN_YM_SH1 - 4, PIN_YM_SH2 - 4);
 
   ledcAttachChannel(PIN_PWM_R, PWM_FREQ, PWM_RES, YM_PWM_CH_R);
   ledcAttachChannel(PIN_PWM_L, PWM_FREQ, PWM_RES, YM_PWM_CH_L);
