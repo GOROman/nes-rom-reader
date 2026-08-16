@@ -3,9 +3,9 @@
 
 usage: mdxplay.py <file.evt> [--port /dev/cu.usbmodem1101] [--tune HZ | --no-tune]
 
-ピッチ補正: MDX は X68000 (φM=4MHz) 前提。実チップを 3.58MHz 系で駆動して
-いる場合は KC/KF を 1/64半音単位でシフトして本来のピッチに合わせる。
---tune には実測の φM (デフォルト 3580420 = 本機の LEDC 実測値) を渡す。
+ピッチ補正: MDX は X68000 (φM=4MHz) 前提。ファームは現在 4MHz 駆動なので
+既定では補正なし。3.58MHz 系で駆動する場合のみ --tune に実測の φM を渡すと
+KC/KF を 1/64半音単位でシフトして本来のピッチに合わせる。
 """
 import argparse
 import math
@@ -72,8 +72,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("evt")
     ap.add_argument("--port", default="/dev/cu.usbmodem1101")
-    ap.add_argument("--tune", type=float, default=3580420.0,
-                    help="実チップの φM 実測値 [Hz]。4MHz 相当へピッチ補正する")
+    ap.add_argument("--tune", type=float, default=4000000.0,
+                    help="実チップの φM 実測値 [Hz]。4MHz 相当へピッチ補正する"
+                         "(既定=4MHz なので補正なし。3.58MHz駆動時は実測値を渡す)")
     ap.add_argument("--no-tune", action="store_true", help="ピッチ補正しない")
     args = ap.parse_args()
 
