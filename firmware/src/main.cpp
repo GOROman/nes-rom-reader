@@ -404,6 +404,10 @@ static volatile int ymLOff = 0;   // L デコードのビットオフセット (
 static volatile int ymROff = 0;   // R 側も同様に調整可能
 static volatile uint32_t ymRawBuf[64];  // R ラッチ時の生シフトレジスタ(G コマンドでダンプ)
 static volatile uint8_t ymRawIdx = 0;
+static volatile uint8_t ymRawArm = 0;   // G コマンドで64サンプル分だけ記録(通常再生は負荷ゼロ)
+static volatile bool ymMedianEn = true; // メディアンフィルタ有効(N コマンドで切替)
+static volatile uint32_t ymMedFixR = 0, ymMedFixL = 0;  // フィルタが値を差し替えた回数
+static volatile uint32_t ymBadExp = 0;  // e==0(YM3012仕様で禁止値)で破棄した数
 static volatile int16_t ymDutyMinL = 32767, ymDutyMaxL = -32768;
 
 // Core 0 の専用タスク。φ1(=φM/2、4MHz時2MHz)をポーリングでエッジ検出する。
@@ -471,40 +475,59 @@ static void ymCaptureLoop(void*) {
         ymFrameCount++;
         if (cnt < ymP1Min) ymP1Min = cnt;
         if (cnt > ymP1Max) ymP1Max = cnt;
-        // ハーフフレーム先頭の3ビットは捨てビットなので 13 まで許容
+        // ハーフフレーム先頭の3ビットは捨てビットなので 13 まで許容。
+        // 17/33 は余分な1ビットがワードの後に入った状態なので抽出位置を+1補正
         if ((cnt >= 13 && cnt <= 17) || (cnt >= 29 && cnt <= 33)) {
-          int kr = ymROff;
+          int kr = ymROff + ((cnt == 17 || cnt == 33) ? 1 : 0);
           uint16_t m = (sr >> (19 - kr)) & 0x3FF; // 仮数 (B0 が LSB、B9=符号)
           uint16_t e = (sr >> (29 - kr)) & 0x07;  // 指数 (S0 が LSB)
-          int32_t duty = decodeDuty(m, e, nsErrR);
-          int32_t out = med3(mR2, mR1, duty);
-          mR2 = mR1; mR1 = duty; duty = out;
-          ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
-          ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
-          ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
-          ymSampleCount++;
-          ymLastRaw = (uint16_t)(sr >> 16);
-          ymRawBuf[ymRawIdx++ & 63] = sr;
-          if (duty < ymDutyMin) ymDutyMin = duty;
-          if (duty > ymDutyMax) ymDutyMax = duty;
+          if (e == 0) {                           // YM3012仕様で指数000は禁止=化けたワード
+            ymBadExp++;
+          } else {
+            int32_t duty = decodeDuty(m, e, nsErrR);
+            if (ymMedianEn) {
+              int32_t out = med3(mR2, mR1, duty);
+              mR2 = mR1; mR1 = duty;
+              int32_t d = out - duty;
+              if (d > 24 || d < -24) ymMedFixR++;  // スパイク級の差し替えのみ計数
+              duty = out;
+            }
+            ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
+            ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
+            ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
+            ymSampleCount++;
+            ymLastRaw = (uint16_t)(sr >> 16);
+            if (ymRawArm) { ymRawBuf[ymRawIdx++ & 63] = sr; ymRawArm--; }
+            if (duty < ymDutyMin) ymDutyMin = duty;
+            if (duty > ymDutyMax) ymDutyMax = duty;
+          }
         }
         cnt = 0;
       }
       if ((chg & SH2) && !(in & SH2)) {       // SH2 立ち下がり = LEFT ch 確定
         if (cnt >= 13 && cnt <= 17) {
-          int k = ymLOff;                         // SH2 の位相差補正 (O コマンド)
+          int k = ymLOff + ((cnt == 17) ? 1 : 0); // 17は余分1ビットぶん抽出位置を補正
           uint16_t m = (sr >> (19 - k)) & 0x3FF;
           uint16_t e = (sr >> (29 - k)) & 0x07;
-          int32_t duty = decodeDuty(m, e, nsErrL);
-          int32_t out = med3(mL2, mL1, duty);
-          mL2 = mL1; mL1 = duty; duty = out;
-          ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
-          ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
-          ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
-          ymSampleCountL++;
-          ymLastRawL = (uint16_t)(sr >> 16);
-          if (duty < ymDutyMinL) ymDutyMinL = duty;
-          if (duty > ymDutyMaxL) ymDutyMaxL = duty;
+          if (e == 0) {
+            ymBadExp++;
+          } else {
+            int32_t duty = decodeDuty(m, e, nsErrL);
+            if (ymMedianEn) {
+              int32_t out = med3(mL2, mL1, duty);
+              mL2 = mL1; mL1 = duty;
+              int32_t d = out - duty;
+              if (d > 24 || d < -24) ymMedFixL++;  // スパイク級の差し替えのみ計数
+              duty = out;
+            }
+            ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
+            ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
+            ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
+            ymSampleCountL++;
+            ymLastRawL = (uint16_t)(sr >> 16);
+            if (duty < ymDutyMinL) ymDutyMinL = duty;
+            if (duty > ymDutyMaxL) ymDutyMaxL = duty;
+          }
         }
         cnt = 0;
       }
@@ -586,6 +609,10 @@ static void ymDiag() {
                 ymDutyMin, ymDutyMax);
   Serial.printf("DIAG L: samples=%lu last=%04X duty=%d..%d\n",
                 (unsigned long)ymSampleCountL, ymLastRawL, ymDutyMinL, ymDutyMaxL);
+  Serial.printf("DIAG med=%d fixR=%lu fixL=%lu badExp=%lu\n",
+                ymMedianEn ? 1 : 0, (unsigned long)ymMedFixR,
+                (unsigned long)ymMedFixL, (unsigned long)ymBadExp);
+  ymMedFixR = 0; ymMedFixL = 0; ymBadExp = 0;
   ymDutyMin = 32767; ymDutyMax = -32768;   // 次回に向けてリセット
   ymDutyMinL = 32767; ymDutyMaxL = -32768;
   ymP1Min = 0xFFFF; ymP1Max = 0;
@@ -1024,14 +1051,22 @@ void loop() {
         break;
       // L チャンネルのデコード位置調整(SH2 位相差の実験用)。
       // O <hex 0-6> -> オフセット -3..+3 を設定し "LOFF n" を返す
-      // R ラッチ時の生ワード64個をダンプ(アライメント解析用)
+      // R ラッチ時の生ワード64個をダンプ(アライメント解析用)。
+      // 通常再生の負荷を避けるため、Gを受けた時だけ64サンプル記録する
       case 'G': {
+        ymRawArm = 64;
+        delay(50);   // 62.5kHz なら64サンプルは約1msで揃う
         for (int i = 0; i < 64; i++) {
           Serial.printf("%08lX%c", (unsigned long)ymRawBuf[i], (i % 8 == 7) ? '\n' : ' ');
         }
         Serial.print("GDONE\n");
         break;
       }
+      // メディアンフィルタの有効/無効(効果の A/B 比較用)
+      case 'N':
+        ymMedianEn = (addr != 0);
+        Serial.printf("MEDIAN %d\n", ymMedianEn ? 1 : 0);
+        break;
       case 'O': {
         int offL = (int)(addr & 7) - 3;
         int offR = (int)(len & 7) - 3;
