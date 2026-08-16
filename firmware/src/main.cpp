@@ -105,14 +105,23 @@ static inline uint32_t srPpuAddr(uint16_t addr) {
   return v;
 }
 
+// GPIO レジスタ直叩きで高速化(digitalWrite 比 約10倍)。YM2151 再生時の
+// 書き込みバースト遅延(テンポのもたつき)対策。SRCLK パルス幅はダミー
+// 書き込みで約80nsを確保(74HCT595 の最小パルス幅 20ns@4.5V に対し十分)。
 static void srWrite32(uint32_t v) {
+  const uint32_t B_DATA  = 1UL << PIN_SR_DATA;
+  const uint32_t B_CLK   = 1UL << PIN_SR_CLK;
+  const uint32_t B_LATCH = 1UL << PIN_SR_LATCH;
   for (int i = 31; i >= 0; i--) {  // MSBファースト (bit31が最初)
-    digitalWrite(PIN_SR_DATA, (v >> i) & 1);
-    digitalWrite(PIN_SR_CLK, HIGH);
-    digitalWrite(PIN_SR_CLK, LOW);
+    if ((v >> i) & 1) REG_WRITE(GPIO_OUT_W1TS_REG, B_DATA);
+    else              REG_WRITE(GPIO_OUT_W1TC_REG, B_DATA);
+    REG_WRITE(GPIO_OUT_W1TS_REG, B_CLK);
+    REG_WRITE(GPIO_OUT_W1TS_REG, B_CLK);   // パルス幅確保
+    REG_WRITE(GPIO_OUT_W1TC_REG, B_CLK);
   }
-  digitalWrite(PIN_SR_LATCH, HIGH);
-  digitalWrite(PIN_SR_LATCH, LOW);
+  REG_WRITE(GPIO_OUT_W1TS_REG, B_LATCH);
+  REG_WRITE(GPIO_OUT_W1TS_REG, B_LATCH);   // パルス幅確保
+  REG_WRITE(GPIO_OUT_W1TC_REG, B_LATCH);
 }
 
 static uint8_t readDataBus() {
@@ -690,7 +699,7 @@ static void ymClockStop() {
 }
 
 // BUSY は読めないので最悪値で待つ。BUSY 期間は φM 68サイクル ≒ 19µs。
-static void ymWaitBusy() { delayMicroseconds(30); }
+static void ymWaitBusy() { delayMicroseconds(20); }  // BUSY=68φM≒17µs@4MHz
 
 // データと A0 をアドレス線に確定させ、A9 で /WR パルスを作る。
 // セットアップ/ホールドは srWrite32 の所要時間(数十µs)で自然に満たされる。
@@ -702,10 +711,9 @@ static void ymWriteBus(bool a0, uint8_t v) {
 }
 
 static void ymWriteReg(uint8_t reg, uint8_t val) {
-  ymWriteBus(false, reg);   // A0=0: アドレス
-  ymWaitBusy();
+  ymWriteBus(false, reg);   // A0=0: アドレス (BUSYは立たないので待ち不要)
   ymWriteBus(true, val);    // A0=1: データ
-  ymWaitBusy();
+  ymWaitBusy();             // データ書き込み後のみ BUSY 待ち
 }
 
 // φM 供給開始 + /IC リセット。YM2151 はリセット中もクロックが必要。
