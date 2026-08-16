@@ -42,6 +42,8 @@
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
+#include <hal/gpio_ll.h>
+#include <driver/ledc.h>
 
 // --- ピンアサイン (docs/hardware-design.md と一致させること) ---
 // 制御線は全て 74HCT541 バッファ経由で 5V 化してカートリッジへ。
@@ -299,10 +301,35 @@ static const uint32_t YM_CLOCK_HZ = 3579545;  // φM: NTSC カラーバースト
 static const uint16_t YM_WR_N = 1 << 9;   // CPU A9  = /WR (負論理)
 static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
+// φM は Arduino の ledcAttach だと 3.58MHz 設定が静かに失敗することがあるため、
+// ESP-IDF の API で APB 80MHz ソースを明示して設定する。
+// タイマー3/チャネル7 を専有(Arduino 側の自動割り当てと衝突させない)。
 static void ymClockStart() {
   if (ymClockOn) return;
-  ledcAttach(PIN_M2, YM_CLOCK_HZ, 3);  // 3bit分解能 (4bit だと div<2 で setup 失敗)
-  ledcWrite(PIN_M2, 4);                // duty 4/8 = 50%
+  // LEDC は全タイマーでクロック源を共有し、Arduino の ledcAttach(音声PWM側)は
+  // XTAL(40MHz) を選ぶため、φM 側も明示的に XTAL に合わせる。
+  // 2bit 分解能で分周比 40M/(3.579545M×4)=2.79 → 実周波数 ≒3.580MHz。
+  ledc_timer_config_t tcfg = {};
+  tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
+  tcfg.duty_resolution = LEDC_TIMER_2_BIT;
+  tcfg.timer_num = LEDC_TIMER_3;
+  tcfg.freq_hz = YM_CLOCK_HZ;
+  tcfg.clk_cfg = LEDC_USE_XTAL_CLK;
+  esp_err_t e1 = ledc_timer_config(&tcfg);
+  ledc_channel_config_t ccfg = {};
+  ccfg.gpio_num = PIN_M2;
+  ccfg.speed_mode = LEDC_LOW_SPEED_MODE;
+  ccfg.channel = LEDC_CHANNEL_7;
+  ccfg.timer_sel = LEDC_TIMER_3;
+  ccfg.duty = 2;                       // 2/4 = 50%
+  ccfg.hpoint = 0;
+  esp_err_t e2 = ledc_channel_config(&ccfg);
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7, 2);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7);
+  ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
+  uint32_t fr = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
+  if (e1 != ESP_OK || e2 != ESP_OK || fr == 0)
+    Serial.printf("ERR YM_CLOCK timer=%d ch=%d freq=%lu\n", (int)e1, (int)e2, (unsigned long)fr);
   ymClockOn = true;
 }
 
@@ -445,13 +472,60 @@ static void ymDiag() {
                 (unsigned long)ymSampleCount, ymLastRaw,
                 ymDutyMin, ymDutyMax);
   ymDutyMin = 32767; ymDutyMax = -32768;   // 次回に向けてリセット
+
+  // MD0-7(PPU データバス 8本)全部のエッジ数。SO/SH1/φ1 が想定外の
+  // CHR ROM ピンに配線されていた場合、別のビットに活動が現れる。
+  digitalWrite(PIN_OE_CHR, LOW);
+  delayMicroseconds(10);
+  uint32_t cnt[8] = {0};
+  prev = REG_READ(GPIO_IN_REG);
+  t0 = millis();
+  while (millis() - t0 < 100) {
+    uint32_t in = REG_READ(GPIO_IN_REG);
+    uint32_t chg = in ^ prev;
+    for (int i = 0; i < 8; i++)
+      if (chg & (1UL << PIN_D[i])) cnt[i]++;
+    prev = in;
+  }
+  if (oeWas) digitalWrite(PIN_OE_CHR, HIGH);
+  Serial.printf("DIAG MD0-7 edges:");
+  for (int i = 0; i < 8; i++) Serial.printf(" %lu", (unsigned long)cnt[i]);
+  Serial.print("\n");
+
+  // M2(G42) の読み戻しで φM が実際に出ているか確認。
+  // IO_MUX の入力イネーブルだけ立てるので LEDC 出力は壊さない。
+  gpio_ll_input_enable(&GPIO, (gpio_num_t)PIN_M2);
+  uint32_t m2edges = 0;
+  uint32_t prev1 = REG_READ(GPIO_IN1_REG);
+  t0 = millis();
+  while (millis() - t0 < 20) {
+    uint32_t in1 = REG_READ(GPIO_IN1_REG);
+    if ((in1 ^ prev1) & (1UL << (PIN_M2 - 32))) m2edges++;
+    prev1 = in1;
+  }
+  Serial.printf("DIAG M2(phiM) edges/20ms=%lu (expect >50000 if clocking)\n",
+                (unsigned long)m2edges);
+
+  // 読み戻し手法自体の検証: G46(音声PWM 78kHz)のエッジも数える。
+  // YMモード中なら約3100/20ms 出るはず。ここが0なら読み戻し方法の問題。
+  gpio_ll_input_enable(&GPIO, (gpio_num_t)PIN_PWM_OUT);
+  uint32_t pwmEdges = 0;
+  prev1 = REG_READ(GPIO_IN1_REG);
+  t0 = millis();
+  while (millis() - t0 < 20) {
+    uint32_t in1 = REG_READ(GPIO_IN1_REG);
+    if ((in1 ^ prev1) & (1UL << (PIN_PWM_OUT - 32))) pwmEdges++;
+    prev1 = in1;
+  }
+  Serial.printf("DIAG G46(pwm) edges/20ms=%lu (expect ~3100 in YM mode)\n",
+                (unsigned long)pwmEdges);
 }
 
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
 static void ymClockStop() {
   if (!ymClockOn) return;
   ymAudioStop();
-  ledcDetach(PIN_M2);
+  ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7, 1);
   ymClockOn = false;
   pinMode(PIN_M2, OUTPUT);
   digitalWrite(PIN_M2, HIGH);
