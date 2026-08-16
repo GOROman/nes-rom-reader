@@ -369,13 +369,20 @@ static bool ymClockStart() {
 static const int PIN_YM_SO   = 4;   // MD0
 static const int PIN_YM_SH1  = 5;   // MD1
 static const int PIN_YM_PHI1 = 6;   // MD2
-static const int PIN_PWM_OUT = 46;  // CIRAM A10 分圧の中点
+static const int PIN_YM_SH2  = 7;   // MD3 (SH2=LEFTch。CHR ROM pin14 経由、固定割り当て)
+// PWM 音声出力はカートリッジへ向かう空き制御線2本を転用する(基板側の配線が不要):
+//   R = PPU /RD (G2) → 541 → エッジ17 → CHR ROM pin 22
+//   L = PPU /WR (G3) → 541 → エッジ47(フィンガー)
+static const int PIN_PWM_R = PIN_PPU_RD;
+static const int PIN_PWM_L = PIN_PPU_WR;
 // 78.125kHz / 9bit (80MHz / 512 / 2)。LEDC は分周比2未満を設定できないため
 // 10bit では setup が失敗する(div_param=0)。
 static const uint32_t PWM_FREQ = 78125;
 static const int PWM_RES = 9;       // duty 0-511、中点 256
-// キャプチャループからレジスタ直叩きで duty 更新するため、チャネル番号を固定する
-static const ledc_channel_t YM_PWM_CH = LEDC_CHANNEL_0;
+// キャプチャループからレジスタ直叩きで duty 更新するため、チャネル番号を固定する。
+// ch0/ch1 は同じタイマー0を共有(同一周波数・独立デューティ)。φM は ch7/timer3。
+static const ledc_channel_t YM_PWM_CH_R = LEDC_CHANNEL_0;
+static const ledc_channel_t YM_PWM_CH_L = LEDC_CHANNEL_1;
 
 static volatile bool ymCaptureRun = false;
 static volatile uint32_t ymSampleCount = 0;   // 採用したワード数
@@ -399,60 +406,71 @@ static void ymCaptureLoop(void*) {
   // 全エッジを捕捉しきれない。バンドルは使用するコア(Core 0)で作ること。
   static dedic_gpio_bundle_handle_t bundle = NULL;
   if (bundle == NULL) {
-    const int pins[3] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1};
+    const int pins[4] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1, PIN_YM_SH2};
     dedic_gpio_bundle_config_t cfg = {};
     cfg.gpio_array = (int*)pins;
-    cfg.array_size = 3;
+    cfg.array_size = 4;
     cfg.flags.in_en = 1;
     dedic_gpio_new_bundle(&cfg, &bundle);
   }
+  // 13bitワード(sr)→ 9bit デューティ。フル精度デコード+1次ノイズシェーピング。
+  // 量子化ノイズが高域に移り、後段の RC フィルタで削れるので実効 S/N が上がる。
+  auto decodeDuty = [](uint16_t sr, int32_t &nsErr) -> int32_t {
+    uint16_t m = (sr >> 3) & 0x3FF;               // 仮数 (B0 が LSB、B9=符号)
+    uint16_t e = (sr >> 13) & 0x07;               // 指数 (S0 が LSB)
+    int32_t v = (int32_t)m - 512;                 // -512..+511
+    int32_t pcm = (v * 64) >> (7 - (e ? e : 1));  // ±32704 (16bit相当)。負数<<はUBなので乗算
+    int32_t acc = (pcm + 32768) + nsErr;
+    int32_t duty = acc >> 7;                      // 16bit -> 9bit
+    if (duty < 0) duty = 0; else if (duty > 511) duty = 511;
+    nsErr = acc - (duty << 7);
+    if (nsErr > 127) nsErr = 127; else if (nsErr < -128) nsErr = -128;  // アンチワインドアップ
+    return duty;
+  };
   for (;;) {
     if (!ymCaptureRun) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-    // GPIOマスク(1<<pin, pin=4..6) → バンドルビット(1<<(pin-4)) へ変換
+    // GPIOマスク(1<<pin, pin=4..7) → バンドルビット(1<<(pin-4)) へ変換
     const uint32_t SO = ymMaskSO >> 4, SH = ymMaskSH >> 4, P1 = ymMaskP1 >> 4;
+    const uint32_t SH2 = 1UL << (PIN_YM_SH2 - 4);  // LEFT ch は配線固定
     uint32_t prev = dedic_gpio_cpu_ll_read_in();
     uint16_t sr = 0;
     // 割り込みは止めない(IWDT/クラッシュ回避)。tick 等でビットを落とした
-    // フレームは φ1 エッジ数(1フレーム=32)の検証で検出して捨てる。
-    // 捨てたフレームは直前のデューティを保持するだけなので聴感上無音。
-    uint16_t p1cnt = 0;
-    int32_t nsErr = 0;   // ノイズシェーピングの量子化誤差繰り越し
+    // 区間は φ1 エッジ数の検証で検出して捨てる(直前デューティ保持=聴感上無音)。
+    // ステレオ時は SH2→SH1 間が16クロック。SH2未配線(モノラル)なら
+    // SH1→SH1 の32クロックで従来どおり動く。
+    uint16_t cnt = 0;
+    int32_t nsErrR = 0, nsErrL = 0;
     while (ymCaptureRun) {
       uint32_t in = dedic_gpio_cpu_ll_read_in();
       uint32_t chg = in ^ prev;
       if ((chg & P1) && (in & P1)) {          // φ1 立ち上がり: SO を取り込み
         sr = (sr >> 1) | ((in & SO) ? 0x8000 : 0);
-        p1cnt++;
+        cnt++;
       }
-      if ((chg & SH) && !(in & SH)) {         // SH1 立ち下がり: ワード確定
+      if ((chg & SH) && !(in & SH)) {         // SH1 立ち下がり = RIGHT ch 確定
         ymFrameCount++;
-        if (p1cnt < ymP1Min) ymP1Min = p1cnt;
-        if (p1cnt > ymP1Max) ymP1Max = p1cnt;
-        if (p1cnt >= 29 && p1cnt <= 33) {    // ラッチ処理で左chスロット冒頭を数え損ねる分(無害)も許容
-          uint16_t m = (sr >> 3) & 0x3FF;     // 仮数 (B0 が LSB、B9=符号)
-          uint16_t e = (sr >> 13) & 0x07;     // 指数 (S0 が LSB)
-          int32_t v = (int32_t)m - 512;       // -512..+511
-          // フル精度(16bit相当)でデコードし、1次ノイズシェーピング
-          // (量子化誤差の繰り越し)で 9bit PWM へ落とす。量子化ノイズが
-          // 高域に移り、後段の RC フィルタで削れるので実効 S/N が上がる。
-          // v*64: 負数の << は未定義動作なので乗算で書く
-          int32_t pcm = (v * 64) >> (7 - (e ? e : 1));   // ±32704 (16bit相当)
-          int32_t acc = (pcm + 32768) + nsErr;
-          int32_t duty = acc >> 7;                        // 16bit -> 9bit
-          if (duty < 0) duty = 0; else if (duty > 511) duty = 511;
-          nsErr = acc - (duty << 7);
-          // アンチワインドアップ: クリップ中に誤差が無限に溜まるのを防ぐ
-          if (nsErr > 127) nsErr = 127; else if (nsErr < -128) nsErr = -128;
-          // LEDC レジスタ直叩き(関数呼び出しだと次フレームの φ1 を落とす)
-          ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, duty);
-          ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, true);
-          ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH);
+        if (cnt < ymP1Min) ymP1Min = cnt;
+        if (cnt > ymP1Max) ymP1Max = cnt;
+        if ((cnt >= 15 && cnt <= 17) || (cnt >= 29 && cnt <= 33)) {
+          int32_t duty = decodeDuty(sr, nsErrR);
+          ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
+          ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
+          ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
           ymSampleCount++;
           ymLastRaw = sr;
           if (duty < ymDutyMin) ymDutyMin = duty;
           if (duty > ymDutyMax) ymDutyMax = duty;
         }
-        p1cnt = 0;
+        cnt = 0;
+      }
+      if ((chg & SH2) && !(in & SH2)) {       // SH2 立ち下がり = LEFT ch 確定
+        if (cnt >= 15 && cnt <= 17) {
+          int32_t duty = decodeDuty(sr, nsErrL);
+          ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
+          ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
+          ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
+        }
+        cnt = 0;
       }
       prev = in;
     }
@@ -513,38 +531,39 @@ static void ymAudioStart() {
                   (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2]);
   }
 
-  ledcAttachChannel(PIN_PWM_OUT, PWM_FREQ, PWM_RES, YM_PWM_CH);
-  ledcWrite(PIN_PWM_OUT, 256);          // 無音(中点)
+  ledcAttachChannel(PIN_PWM_R, PWM_FREQ, PWM_RES, YM_PWM_CH_R);
+  ledcAttachChannel(PIN_PWM_L, PWM_FREQ, PWM_RES, YM_PWM_CH_L);
+  ledcWrite(PIN_PWM_R, 256);            // 無音(中点)
+  ledcWrite(PIN_PWM_L, 256);
   ymCaptureRun = true;
 }
 
 static void ymAudioStop() {
   ymCaptureRun = false;
   delay(2);
-  ledcDetach(PIN_PWM_OUT);
-  pinMode(PIN_PWM_OUT, INPUT);          // ミラーリング判定入力に戻す
+  ledcDetach(PIN_PWM_R);
+  ledcDetach(PIN_PWM_L);
+  pinMode(PIN_PWM_R, OUTPUT);           // PPU /RD / /WR をバスアイドル(High)へ戻す
+  pinMode(PIN_PWM_L, OUTPUT);
+  digitalWrite(PIN_PWM_R, HIGH);
+  digitalWrite(PIN_PWM_L, HIGH);
   digitalWrite(PIN_OE_CHR, HIGH);
 }
 
-// G46 出力の配線前チェック用。まず GPIO の High/Low 駆動を読み戻して報告し
-// (外付け20kプルダウンがあるので、駆動できなければ H=0 になる)、
-// 続けて 880Hz テストトーンを1.5秒出す。
+// PWM 出力(R=G2/エッジ17、L=G3/エッジ47)の配線チェック用。
+// 880Hz テストトーンを両chに1.5秒出す。
 static void toneTest() {
   bool wasRunning = ymCaptureRun;
   if (wasRunning) ymAudioStop();
-  gpio_set_direction((gpio_num_t)PIN_PWM_OUT, GPIO_MODE_INPUT_OUTPUT);
-  digitalWrite(PIN_PWM_OUT, HIGH);
-  delayMicroseconds(20);
-  bool hi = digitalRead(PIN_PWM_OUT);
-  digitalWrite(PIN_PWM_OUT, LOW);
-  delayMicroseconds(20);
-  bool lo = digitalRead(PIN_PWM_OUT);
-  Serial.printf("G46 DRIVE H=%d L=%d %s\n", hi, lo, (hi && !lo) ? "OK" : "NG");
-  ledcAttach(PIN_PWM_OUT, 880, 10);
-  ledcWrite(PIN_PWM_OUT, 512);
+  ledcAttachChannel(PIN_PWM_R, 880, 10, YM_PWM_CH_R);
+  ledcAttachChannel(PIN_PWM_L, 880, 10, YM_PWM_CH_L);
+  ledcWrite(PIN_PWM_R, 512);
+  ledcWrite(PIN_PWM_L, 512);
   delay(1500);
-  ledcDetach(PIN_PWM_OUT);
-  pinMode(PIN_PWM_OUT, INPUT);
+  ledcDetach(PIN_PWM_R);
+  ledcDetach(PIN_PWM_L);
+  pinMode(PIN_PWM_R, OUTPUT); digitalWrite(PIN_PWM_R, HIGH);
+  pinMode(PIN_PWM_L, OUTPUT); digitalWrite(PIN_PWM_L, HIGH);
   if (wasRunning) ymAudioStart();
 }
 
@@ -649,18 +668,17 @@ static void ymDiag() {
   Serial.printf("DIAG M2(phiM) edges/20ms=%lu (expect >50000 if clocking)\n",
                 (unsigned long)m2edges);
 
-  // 読み戻し手法自体の検証: G46(音声PWM 78kHz)のエッジも数える。
-  // YMモード中なら約3100/20ms 出るはず。ここが0なら読み戻し方法の問題。
-  gpio_ll_input_enable(&GPIO, (gpio_num_t)PIN_PWM_OUT);
+  // 音声PWM(R=G2)の出力エッジも数える。YMモード中なら約3100/20ms 出るはず。
+  gpio_ll_input_enable(&GPIO, (gpio_num_t)PIN_PWM_R);
   uint32_t pwmEdges = 0;
-  prev1 = REG_READ(GPIO_IN1_REG);
+  prev = REG_READ(GPIO_IN_REG);
   t0 = millis();
   while (millis() - t0 < 20) {
-    uint32_t in1 = REG_READ(GPIO_IN1_REG);
-    if ((in1 ^ prev1) & (1UL << (PIN_PWM_OUT - 32))) pwmEdges++;
-    prev1 = in1;
+    uint32_t in0 = REG_READ(GPIO_IN_REG);
+    if ((in0 ^ prev) & (1UL << PIN_PWM_R)) pwmEdges++;
+    prev = in0;
   }
-  Serial.printf("DIAG G46(pwm) edges/20ms=%lu (expect ~3100 in YM mode)\n",
+  Serial.printf("DIAG PWM-R(G2) edges/20ms=%lu (expect ~3100 in YM mode)\n",
                 (unsigned long)pwmEdges);
 }
 
@@ -796,17 +814,21 @@ void setup() {
   // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
   // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
   Serial.printf("RST reason=%d\n", (int)esp_reset_reason());
-  // 起動確認の短いSE(ピロリ♪)を G46 の PWM で鳴らす。
+  // 起動確認の短いSE(ピロリ♪)を両ch PWM で鳴らす。
   // デューティを3%に絞って音量を下げる(50%だとフルスイングで大きすぎる)
   static const uint16_t bootSe[3] = {1319, 1760, 2093};  // E6 A6 C7
-  ledcAttach(PIN_PWM_OUT, bootSe[0], 10);
+  ledcAttachChannel(PIN_PWM_R, bootSe[0], 10, YM_PWM_CH_R);
+  ledcAttachChannel(PIN_PWM_L, bootSe[0], 10, YM_PWM_CH_L);
   for (int i = 0; i < 3; i++) {
-    ledcChangeFrequency(PIN_PWM_OUT, bootSe[i], 10);
-    ledcWrite(PIN_PWM_OUT, 32);   // 32/1024 ≒ 3% duty ≒ -20dB
+    ledcChangeFrequency(PIN_PWM_R, bootSe[i], 10);  // ch0/1は同一タイマーなので両chに効く
+    ledcWrite(PIN_PWM_R, 32);   // 32/1024 ≒ 3% duty ≒ -20dB
+    ledcWrite(PIN_PWM_L, 32);
     delay(70);
   }
-  ledcDetach(PIN_PWM_OUT);
-  pinMode(PIN_PWM_OUT, INPUT);
+  ledcDetach(PIN_PWM_R);
+  ledcDetach(PIN_PWM_L);
+  pinMode(PIN_PWM_R, OUTPUT); digitalWrite(PIN_PWM_R, HIGH);
+  pinMode(PIN_PWM_L, OUTPUT); digitalWrite(PIN_PWM_L, HIGH);
   ledReady();               // 電源ON = 緑
 }
 

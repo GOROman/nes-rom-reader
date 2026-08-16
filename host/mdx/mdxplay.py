@@ -76,9 +76,9 @@ def main():
                     help="実チップの φM 実測値 [Hz]。4MHz 相当へピッチ補正する"
                          "(既定=4MHz なので補正なし。3.58MHz駆動時は実測値を渡す)")
     ap.add_argument("--no-tune", action="store_true", help="ピッチ補正しない")
-    ap.add_argument("--no-monomix", action="store_true",
-                    help="パンをそのまま送る(既定は全chのRLを両ONにして、"
-                         "モノラル出力での片ch欠落を防ぐ)")
+    ap.add_argument("--monomix", action="store_true",
+                    help="全chのRLを両ONに強制(モノラル出力構成で左パンの"
+                         "パート欠落を防ぐ。ステレオ構成では不要)")
     args = ap.parse_args()
 
     events = []
@@ -93,9 +93,8 @@ def main():
         offset64 = round(768 * math.log2(4000000.0 / args.tune))
         print(f"pitch offset: {offset64} (1/64 semitone)")
     events = transform_events(events, offset64)
-    if not args.no_monomix:
-        # レジスタ $20-$27 の bit7-6 (RL出力イネーブル) を両ONに強制。
-        # 現状の出力はモノラル(RIGHTch)なので、左パンのパートが欠落しないように。
+    if args.monomix:
+        # レジスタ $20-$27 の bit7-6 (RL出力イネーブル) を両ONに強制
         events = [(t, a, (d | 0xC0) if 0x20 <= a <= 0x27 else d)
                   for t, a, d in events]
     data = encode(events)
