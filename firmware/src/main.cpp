@@ -465,7 +465,8 @@ static void ymCaptureLoop(void*) {
         ymFrameCount++;
         if (cnt < ymP1Min) ymP1Min = cnt;
         if (cnt > ymP1Max) ymP1Max = cnt;
-        if ((cnt >= 15 && cnt <= 17) || (cnt >= 29 && cnt <= 33)) {
+        // ハーフフレーム先頭の3ビットは捨てビットなので 13 まで許容
+        if ((cnt >= 13 && cnt <= 17) || (cnt >= 29 && cnt <= 33)) {
           int kr = ymROff;
           uint16_t m = (sr >> (19 - kr)) & 0x3FF; // 仮数 (B0 が LSB、B9=符号)
           uint16_t e = (sr >> (29 - kr)) & 0x07;  // 指数 (S0 が LSB)
@@ -482,7 +483,7 @@ static void ymCaptureLoop(void*) {
         cnt = 0;
       }
       if ((chg & SH2) && !(in & SH2)) {       // SH2 立ち下がり = LEFT ch 確定
-        if (cnt >= 15 && cnt <= 17) {
+        if (cnt >= 13 && cnt <= 17) {
           int k = ymLOff;                         // SH2 の位相差補正 (O コマンド)
           uint16_t m = (sr >> (19 - k)) & 0x3FF;
           uint16_t e = (sr >> (29 - k)) & 0x07;
@@ -534,11 +535,13 @@ static void ymAudioStop() {
 static void toneTest() {
   bool wasRunning = ymCaptureRun;
   if (wasRunning) ymAudioStop();
+  // R=880Hz / L=440Hz の別トーンを3秒。左右の配線・音量差の切り分け用。
+  // ch0/1 は同一タイマーなので周波数を分けるため L はタイマー2/ch4 を使う
   ledcAttachChannel(PIN_PWM_R, 880, 10, YM_PWM_CH_R);
-  ledcAttachChannel(PIN_PWM_L, 880, 10, YM_PWM_CH_L);
-  ledcWrite(PIN_PWM_R, 32);   // 3% duty: 電源負荷(ブラウンアウト)を避けた小音量
-  ledcWrite(PIN_PWM_L, 32);
-  delay(1500);
+  ledcAttachChannel(PIN_PWM_L, 440, 10, LEDC_CHANNEL_4);
+  ledcWrite(PIN_PWM_R, 64);   // 6% duty の小音量
+  ledcWrite(PIN_PWM_L, 64);
+  delay(3000);
   ledcDetach(PIN_PWM_R);
   ledcDetach(PIN_PWM_L);
   pinMode(PIN_PWM_R, OUTPUT); digitalWrite(PIN_PWM_R, HIGH);
