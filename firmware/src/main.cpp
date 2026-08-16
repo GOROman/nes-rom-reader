@@ -402,6 +402,7 @@ static void ymCaptureLoop(void*) {
     // フレームは φ1 エッジ数(1フレーム=32)の検証で検出して捨てる。
     // 捨てたフレームは直前のデューティを保持するだけなので聴感上無音。
     uint16_t p1cnt = 0;
+    int32_t nsErr = 0;   // ノイズシェーピングの量子化誤差繰り越し
     while (ymCaptureRun) {
       uint32_t in = dedic_gpio_cpu_ll_read_in();
       uint32_t chg = in ^ prev;
@@ -413,12 +414,18 @@ static void ymCaptureLoop(void*) {
         ymFrameCount++;
         if (p1cnt < ymP1Min) ymP1Min = p1cnt;
         if (p1cnt > ymP1Max) ymP1Max = p1cnt;
-        if (p1cnt >= 31 && p1cnt <= 33) {    // 境界ジッタ(±1)は許容、それ以外は破棄
+        if (p1cnt >= 29 && p1cnt <= 33) {    // ラッチ処理で左chスロット冒頭を数え損ねる分(無害)も許容
           uint16_t m = (sr >> 3) & 0x3FF;     // 仮数 (B0 が LSB、B9=符号)
           uint16_t e = (sr >> 13) & 0x07;     // 指数 (S0 が LSB)
           int32_t v = (int32_t)m - 512;       // -512..+511
-          // 指数が大きいほど大振幅と仮定(逆だったらここを (e) に変える)
-          int32_t duty = 256 + (v >> (8 - (e ? e : 1)));  // 9bit: 0-511
+          // フル精度(16bit相当)でデコードし、1次ノイズシェーピング
+          // (量子化誤差の繰り越し)で 9bit PWM へ落とす。量子化ノイズが
+          // 高域に移り、後段の RC フィルタで削れるので実効 S/N が上がる。
+          int32_t pcm = (v << 6) >> (7 - (e ? e : 1));   // ±32704 (16bit相当)
+          int32_t acc = (pcm + 32768) + nsErr;
+          int32_t duty = acc >> 7;                        // 16bit -> 9bit
+          if (duty < 0) duty = 0; else if (duty > 511) duty = 511;
+          nsErr = acc - (duty << 7);
           // LEDC レジスタ直叩き(関数呼び出しだと次フレームの φ1 を落とす)
           ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, duty);
           ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, true);
