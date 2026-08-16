@@ -454,6 +454,12 @@ static void ymCaptureLoop(void*) {
     // SH1→SH1 の32クロックで従来どおり動く。
     uint16_t cnt = 0;
     int32_t nsErrR = 0, nsErrL = 0;
+    // 3タップ・メディアン(1サンプルの飛び値=EMI起因のスパイク除去)
+    int32_t mR1 = 256, mR2 = 256, mL1 = 256, mL2 = 256;
+    auto med3 = [](int32_t a, int32_t b, int32_t c) -> int32_t {
+      int32_t lo = a < b ? a : b, hi = a < b ? b : a;
+      return c < lo ? lo : (c > hi ? hi : c);
+    };
     while (ymCaptureRun) {
       uint32_t in = dedic_gpio_cpu_ll_read_in();
       uint32_t chg = in ^ prev;
@@ -471,6 +477,8 @@ static void ymCaptureLoop(void*) {
           uint16_t m = (sr >> (19 - kr)) & 0x3FF; // 仮数 (B0 が LSB、B9=符号)
           uint16_t e = (sr >> (29 - kr)) & 0x07;  // 指数 (S0 が LSB)
           int32_t duty = decodeDuty(m, e, nsErrR);
+          int32_t out = med3(mR2, mR1, duty);
+          mR2 = mR1; mR1 = duty; duty = out;
           ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
           ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
           ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
@@ -488,6 +496,8 @@ static void ymCaptureLoop(void*) {
           uint16_t m = (sr >> (19 - k)) & 0x3FF;
           uint16_t e = (sr >> (29 - k)) & 0x07;
           int32_t duty = decodeDuty(m, e, nsErrL);
+          int32_t out = med3(mL2, mL1, duty);
+          mL2 = mL1; mL1 = duty; duty = out;
           ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
           ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
           ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
