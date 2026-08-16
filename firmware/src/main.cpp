@@ -18,13 +18,15 @@
 //                             「選びたいバンク番号と同じ値が入っているPRGアドレス」
 //                             を指定する(ホスト側でPRGダンプから検索)。
 //   F                      -> YM2151 初期化(φM 3.579545MHz 供給開始 + /IC リセット)。
-//                             "YMRDY st=xx\n" を返す。基板v0.2(またはU6 DIRジャンパ改造)のみ。
+//                             "YMRDY\n" を返す。基板改造不要(全リビジョンで有効)。
 //   Y <reg_hex> <val_hex>  -> YM2151 レジスタ書き込み。"YMOK rr vv\n"
 //   Q                      -> YM2151 デモ(テストトーン)。"YMDEMO DONE\n"
 //
-// YM2151 は docs/ym2151.md の通りカートリッジバスへ接続する:
-//   D0-7=CD0-7(U6 B側) /CS=/ROMSEL /WR=CPU R/W /RD=PPU /RD /IC=PPU /WR
-//   A0=CPU A0 φM=M2ピン(LEDC PWM 3.579545MHz に切替)
+// YM2151 は docs/ym2151.md の通り「アドレスバス経由」でカートリッジへ接続する:
+//   D0-7=CPU A1-A8  A0=CPU A0  /WR=CPU R/W  /CS=GND  /RD=+5V  /IC=PPU /WR
+//   φM=M2ピン(LEDC PWM 3.579545MHz に切替)
+// データバスは使わない(74HCT595 が常時駆動するアドレス線にデータを乗せる)ため
+// U6/BUS_DIR の改造が不要で、BUSY は読めないので固定ウェイトで代替する。
 // F 実行後はカートリッジ用コマンド(R/C/W/P/B)と併用しないこと。
 //
 // データブロック直後の "CRC xxxxxxxx\n" は生データの CRC32
@@ -271,12 +273,12 @@ static void busIdle() {
   digitalWrite(PIN_PPU_WR, HIGH);
 }
 
-// --- YM2151 (基板 v0.2 / U6 DIRジャンパ改造 v0.1 のみ) ---
+// --- YM2151 (アドレスバス方式、基板改造不要・全リビジョン対応) ---
 //
-// カートリッジバスの信号を流用して YM2151 を駆動する。制御線は 74HCT541 で
-// 5V 化され、データは U6(A→B時3.3V駆動)経由。YM2151 の入力は TTL 互換
-// (VIH=2.0V) なので 3.3V 駆動で足りる。
-#if BOARD_REV >= 2
+// YM2151 の D0-7 を CPU A1-A8、A0 を CPU A0 に接続し、74HCT595 が常時5Vで
+// 駆動するアドレス線にレジスタ番号とデータを乗せて CPU R/W(=/WR) をパルスする。
+// /CS は GND 固定、/RD は +5V 固定(ステータスは読まず固定ウェイトで代替)。
+// データバス(U6)を使わないため BUS_DIR 改造が不要。
 static const uint32_t YM_CLOCK_HZ = 3579545;  // φM: NTSC カラーバースト
 
 static void ymClockStart() {
@@ -286,53 +288,25 @@ static void ymClockStart() {
   ymClockOn = true;
 }
 
-// YM2151 ステータス読み出し(bit7 = BUSY)。/CS + /RD で YM が CD バスへ出力し、
-// U6 を B→A(既定方向)で通して読む。
-static uint8_t ymReadStatus() {
-  releaseDataBus();
-  digitalWrite(PIN_BUS_DIR, LOW);
-  digitalWrite(PIN_ROMSEL, LOW);   // /CS
-  digitalWrite(PIN_PPU_RD, LOW);   // /RD
-  digitalWrite(PIN_OE_PRG, LOW);
-  delayMicroseconds(1);
-  uint8_t v = readDataBus();
-  digitalWrite(PIN_OE_PRG, HIGH);
-  digitalWrite(PIN_PPU_RD, HIGH);
-  digitalWrite(PIN_ROMSEL, HIGH);
-  return v;
-}
+// BUSY は読めないので最悪値で待つ。BUSY 期間は φM 68サイクル ≒ 19µs。
+static void ymWaitBusy() { delayMicroseconds(30); }
 
-// BUSY解除待ち。最悪でも数十µs(68 φMサイクル)で解ける。タイムアウト付き。
-static void ymWaitBusy() {
-  for (int i = 0; i < 100; i++) {
-    if (!(ymReadStatus() & 0x80)) return;
-    delayMicroseconds(2);
-  }
-}
-
-// A0(=CPU A0)とデータを確定させて /CS + /WR パルスを打つ
+// アドレス線にデータを確定させて /WR(=CPU R/W) をパルスする。
+// CA0 = YM A0、CA1-CA8 = YM D0-D7。
 static void ymWriteBus(bool a0, uint8_t v) {
-  srWrite32(srCpuAddr(a0 ? 1 : 0));
-  digitalWrite(PIN_OE_PRG, HIGH);
-  digitalWrite(PIN_BUS_DIR, HIGH);  // A→B: MCU が YM を駆動
-  driveDataBus(v);
-  digitalWrite(PIN_OE_PRG, LOW);
+  srWrite32(srCpuAddr(((uint16_t)v << 1) | (a0 ? 1 : 0)));
+  delayMicroseconds(1);          // アドレス=データのセットアップ
+  digitalWrite(PIN_RW, LOW);     // /WR (幅 min 100ns は GPIO 速度で十分満たす)
   delayMicroseconds(1);
-  digitalWrite(PIN_ROMSEL, LOW);    // /CS
-  digitalWrite(PIN_RW, LOW);        // /WR (tWW min 100ns は GPIO 速度で十分満たす)
-  delayMicroseconds(1);
-  digitalWrite(PIN_RW, HIGH);       // /WR 立ち上がりで取り込み
-  digitalWrite(PIN_ROMSEL, HIGH);
-  digitalWrite(PIN_OE_PRG, HIGH);
-  releaseDataBus();
-  digitalWrite(PIN_BUS_DIR, LOW);
+  digitalWrite(PIN_RW, HIGH);    // 立ち上がりで取り込み
+  delayMicroseconds(1);          // ホールド
 }
 
 static void ymWriteReg(uint8_t reg, uint8_t val) {
-  ymWaitBusy();
   ymWriteBus(false, reg);   // A0=0: アドレス
   ymWaitBusy();
   ymWriteBus(true, val);    // A0=1: データ
+  ymWaitBusy();
 }
 
 // φM 供給開始 + /IC リセット。YM2151 はリセット中もクロックが必要。
@@ -368,7 +342,6 @@ static void ymDemo() {
     delay(60);
   }
 }
-#endif  // BOARD_REV >= 2
 
 void setup() {
   for (int i = 0; i < 8; i++) pinMode(PIN_D[i], INPUT);
@@ -528,9 +501,12 @@ void loop() {
         writeCpu((uint16_t)addr, (uint8_t)len);
         Serial.printf("WROK %04X %02X\n", (unsigned)(addr & 0xFFFF), (unsigned)(len & 0xFF));
         break;
+#else
+      case 'P': Serial.print("ERR NEEDS_REV2\n"); break;
+#endif
       case 'F':
         ymInit();
-        Serial.printf("YMRDY st=%02X\n", ymReadStatus());
+        Serial.print("YMRDY\n");
         break;
       case 'Y':
         if (!ymClockOn) { Serial.print("ERR YM_NOT_INIT\n"); ledError(); break; }
@@ -544,12 +520,6 @@ void loop() {
         ledReady();
         Serial.print("YMDEMO DONE\n");
         break;
-#else
-      case 'P': Serial.print("ERR NEEDS_REV2\n"); break;
-      case 'F':
-      case 'Y':
-      case 'Q': Serial.print("ERR NEEDS_REV2\n"); break;
-#endif
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
   }
