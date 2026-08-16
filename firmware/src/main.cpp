@@ -20,7 +20,8 @@
 //   F                      -> YM2151 初期化(φM 3.579545MHz 供給開始 + /IC リセット)。
 //                             "YMRDY\n" を返す。基板改造不要(全リビジョンで有効)。
 //   Y <reg_hex> <val_hex>  -> YM2151 レジスタ書き込み。"YMOK rr vv\n"
-//   Q                      -> YM2151 デモ(テストトーン)。"YMDEMO DONE\n"
+//   Q                      -> YM2151 デモ(ドレミファソラシドをループ再生)。
+//                             次のコマンド受信で停止し "YMDEMO DONE\n"
 //
 // YM2151 は docs/ym2151.md の通り「アドレスバス経由」でカートリッジへ接続する:
 //   D0-7=CPU A0-A7  A0=CPU A8  /WR=CPU A9  /IC=CPU A10  /CS=GND  /RD=+5V
@@ -327,8 +328,9 @@ static void ymInit() {
   delay(2);
 }
 
-// デモ: ch0 に単純な矩形波っぽい音色(CON=7, キャリア1個)を組んで
-// A-C#-E-A のアルペジオを鳴らす
+// デモ: ch0 にシンプルな音色(CON=7, キャリア1個)を組んで
+// ドレミファソラシド(C4-C5)をループ再生する。
+// 次のシリアル入力(=次のコマンド)を受信したら抜ける。
 static void ymDemo() {
   ymWriteReg(0x20, 0xC7);  // ch0: RL=両ch, FB=0, CON=7(全スロット並列)
   ymWriteReg(0x30, 0x00);  // KF=0
@@ -341,14 +343,21 @@ static void ymDemo() {
     ymWriteReg(0xC0 + s, 0x02);           // D2R
     ymWriteReg(0xE0 + s, 0x1A);           // D1L=1, RR=10
   }
-  static const uint8_t kc[4] = {0x4A, 0x4E, 0x51, 0x5A};  // A4, C#5, E5, A5
-  for (int i = 0; i < 4; i++) {
-    ymWriteReg(0x28, kc[i]);  // KC
-    ymWriteReg(0x08, 0x78);   // ch0 全スロット KeyOn
-    delay(180);
-    ymWriteReg(0x08, 0x00);   // KeyOff
-    delay(60);
+  // KC: 上位ニブル=オクターブ、下位=音名 (C#=0,D=1,D#=2,E=4,F=5,F#=6,
+  // G=8,G#=9,A=A,A#=C,B=D,C=E。3/7/B/F は欠番)
+  static const uint8_t kc[8] = {0x3E, 0x41, 0x44, 0x45,   // ド レ ミ ファ (C4 D4 E4 F4)
+                                0x48, 0x4A, 0x4D, 0x4E};  // ソ ラ シ ド   (G4 A4 B4 C5)
+  while (!Serial.available()) {   // 次のコマンドが来るまでループ
+    for (int i = 0; i < 8 && !Serial.available(); i++) {
+      ymWriteReg(0x28, kc[i]);  // KC
+      ymWriteReg(0x08, 0x78);   // ch0 全スロット KeyOn
+      delay(220);
+      ymWriteReg(0x08, 0x00);   // KeyOff
+      delay(60);
+    }
+    delay(300);                 // 1周ごとに一息
   }
+  ymWriteReg(0x08, 0x00);       // 抜けるときはキーオフ
 }
 
 void setup() {
