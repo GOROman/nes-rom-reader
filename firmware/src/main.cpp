@@ -328,8 +328,9 @@ static void ymClockStart() {
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7);
   ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
   uint32_t fr = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
+  Serial.printf("YMCLK freq=%lu (target %lu)\n", (unsigned long)fr, (unsigned long)YM_CLOCK_HZ);
   if (e1 != ESP_OK || e2 != ESP_OK || fr == 0)
-    Serial.printf("ERR YM_CLOCK timer=%d ch=%d freq=%lu\n", (int)e1, (int)e2, (unsigned long)fr);
+    Serial.printf("ERR YM_CLOCK timer=%d ch=%d\n", (int)e1, (int)e2);
   ymClockOn = true;
 }
 
@@ -454,22 +455,6 @@ static void ymAudioStop() {
   ledcDetach(PIN_PWM_OUT);
   pinMode(PIN_PWM_OUT, INPUT);          // ミラーリング判定入力に戻す
   digitalWrite(PIN_OE_CHR, HIGH);
-}
-
-// G46 単体で PWM 矩形波のドレミファソラシド(C4-C5)を1周鳴らす。
-// YM2151 が未配線でも音声経路(分圧中点→アンプ)の確認ができる。
-// シリアル入力があれば途中で中断する。
-static void pwmDoremi() {
-  static const uint16_t freq[8] = {262, 294, 330, 349, 392, 440, 494, 523};
-  ledcAttach(PIN_PWM_OUT, 2000, 10);
-  for (int i = 0; i < 8 && !Serial.available(); i++) {
-    ledcWriteTone(PIN_PWM_OUT, freq[i]);
-    delay(200);
-    ledcWriteTone(PIN_PWM_OUT, 0);   // 消音
-    delay(40);
-  }
-  ledcDetach(PIN_PWM_OUT);
-  pinMode(PIN_PWM_OUT, INPUT);
 }
 
 // G46 出力の配線前チェック用。まず GPIO の High/Low 駆動を読み戻して報告し
@@ -825,15 +810,18 @@ void loop() {
   // 演奏を止め、φM も停止して通常のダンパー動作へ完全復帰する。
   static bool autoPlayChecked = false;
   if (!autoPlayChecked) {
-    autoPlayChecked = true;
-    pwmDoremi();                       // 起動直後: G46 単体の PWM でドレミ1周(約2秒)
-    if (!Serial.available()) {         // ホストが先に喋っていなければ YM 自動演奏へ
+    if (Serial.available()) {
+      autoPlayChecked = true;          // ホストが先に喋った → 通常モード
+    } else if (millis() > 2000) {
+      autoPlayChecked = true;
       ymInit();
       ledBusy();
       ymDemo();                        // シリアル入力が来るまで演奏
       ymClockStop();                   // M2 を GPIO に戻す
       busIdle();
       ledReady();
+    } else {
+      return;
     }
   }
 
