@@ -44,6 +44,9 @@
 #include <esp_task_wdt.h>
 #include <hal/gpio_ll.h>
 #include <driver/ledc.h>
+#include <hal/ledc_ll.h>
+#include <driver/dedic_gpio.h>
+#include <hal/dedic_gpio_cpu_ll.h>
 
 // --- ピンアサイン (docs/hardware-design.md と一致させること) ---
 // 制御線は全て 74HCT541 バッファ経由で 5V 化してカートリッジへ。
@@ -356,10 +359,14 @@ static const int PIN_PWM_OUT = 46;  // CIRAM A10 分圧の中点
 // 10bit では setup が失敗する(div_param=0)。
 static const uint32_t PWM_FREQ = 78125;
 static const int PWM_RES = 9;       // duty 0-511、中点 256
+// キャプチャループからレジスタ直叩きで duty 更新するため、チャネル番号を固定する
+static const ledc_channel_t YM_PWM_CH = LEDC_CHANNEL_0;
 
 static volatile bool ymCaptureRun = false;
-static volatile uint32_t ymSampleCount = 0;   // SH1 でラッチしたワード数
+static volatile uint32_t ymSampleCount = 0;   // 採用したワード数
+static volatile uint32_t ymFrameCount = 0;    // SH1 立ち下がり総数
 static volatile uint16_t ymLastRaw = 0;       // 最後にラッチした生ワード
+static volatile uint16_t ymP1Min = 0xFFFF, ymP1Max = 0;  // フレームあたり φ1 エッジ数
 static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
 
 // Core 0 の専用タスク。φ1(約1.79MHz)をポーリングでエッジ検出する。
@@ -372,40 +379,58 @@ static volatile uint32_t ymMaskSH  = 1UL << PIN_YM_SH1;
 static volatile uint32_t ymMaskP1  = 1UL << PIN_YM_PHI1;
 
 static void ymCaptureLoop(void*) {
+  // Dedicated GPIO: G4/G5/G6 を CPU 直結バンドル(bit0/1/2)にして1サイクルで読む。
+  // 通常の GPIO_IN レジスタ読み(APB経由 ~150ns)では φ1=1.79MHz の
+  // 全エッジを捕捉しきれない。バンドルは使用するコア(Core 0)で作ること。
+  static dedic_gpio_bundle_handle_t bundle = NULL;
+  if (bundle == NULL) {
+    const int pins[3] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1};
+    dedic_gpio_bundle_config_t cfg = {};
+    cfg.gpio_array = (int*)pins;
+    cfg.array_size = 3;
+    cfg.flags.in_en = 1;
+    dedic_gpio_new_bundle(&cfg, &bundle);
+  }
   for (;;) {
     if (!ymCaptureRun) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-    const uint32_t SO = ymMaskSO, SH = ymMaskSH, P1 = ymMaskP1;
-    uint32_t prev = REG_READ(GPIO_IN_REG);
+    // GPIOマスク(1<<pin, pin=4..6) → バンドルビット(1<<(pin-4)) へ変換
+    const uint32_t SO = ymMaskSO >> 4, SH = ymMaskSH >> 4, P1 = ymMaskP1 >> 4;
+    uint32_t prev = dedic_gpio_cpu_ll_read_in();
     uint16_t sr = 0;
-    // キャプチャ中は Core 0 の割り込み(tick等)を止めてビット落ちを防ぐ。
-    // USB/シリアル/再生制御は Core 1 側なので影響しない。
-    portDISABLE_INTERRUPTS();
+    // 割り込みは止めない(IWDT/クラッシュ回避)。tick 等でビットを落とした
+    // フレームは φ1 エッジ数(1フレーム=32)の検証で検出して捨てる。
+    // 捨てたフレームは直前のデューティを保持するだけなので聴感上無音。
+    uint16_t p1cnt = 0;
     while (ymCaptureRun) {
-      uint32_t in = REG_READ(GPIO_IN_REG);
+      uint32_t in = dedic_gpio_cpu_ll_read_in();
       uint32_t chg = in ^ prev;
-      if ((chg & P1) && (in & P1))            // φ1 立ち上がり: SO を取り込み
+      if ((chg & P1) && (in & P1)) {          // φ1 立ち上がり: SO を取り込み
         sr = (sr >> 1) | ((in & SO) ? 0x8000 : 0);
+        p1cnt++;
+      }
       if ((chg & SH) && !(in & SH)) {         // SH1 立ち下がり: ワード確定
-        uint16_t m = (sr >> 3) & 0x3FF;       // 仮数 (B0 が LSB、B9=符号)
-        uint16_t e = (sr >> 13) & 0x07;       // 指数 (S0 が LSB)
-        int32_t v = (int32_t)m - 512;         // -512..+511
-        // 指数が大きいほど大振幅と仮定(逆だったらここを (e) に変える)
-        int32_t duty = 256 + (v >> (8 - (e ? e : 1)));  // 9bit: 0-511
-        ledcWrite(PIN_PWM_OUT, (uint32_t)duty);
-        ymSampleCount++;
-        ymLastRaw = sr;
-        if (duty < ymDutyMin) ymDutyMin = duty;
-        if (duty > ymDutyMax) ymDutyMax = duty;
-        // ラッチ直後は左chスロット(約9µs)でビットを失わない安全窓。
-        // ここで一瞬だけ割り込みを許可し、溜まった tick を処理させて
-        // 割り込みウォッチドッグ(IWDT)の発火を防ぐ。
-        portENABLE_INTERRUPTS();
-        __asm__ __volatile__("nop; nop; nop; nop;");
-        portDISABLE_INTERRUPTS();
+        ymFrameCount++;
+        if (p1cnt < ymP1Min) ymP1Min = p1cnt;
+        if (p1cnt > ymP1Max) ymP1Max = p1cnt;
+        if (p1cnt >= 31 && p1cnt <= 33) {    // 境界ジッタ(±1)は許容、それ以外は破棄
+          uint16_t m = (sr >> 3) & 0x3FF;     // 仮数 (B0 が LSB、B9=符号)
+          uint16_t e = (sr >> 13) & 0x07;     // 指数 (S0 が LSB)
+          int32_t v = (int32_t)m - 512;       // -512..+511
+          // 指数が大きいほど大振幅と仮定(逆だったらここを (e) に変える)
+          int32_t duty = 256 + (v >> (8 - (e ? e : 1)));  // 9bit: 0-511
+          // LEDC レジスタ直叩き(関数呼び出しだと次フレームの φ1 を落とす)
+          ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, duty);
+          ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH, true);
+          ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH);
+          ymSampleCount++;
+          ymLastRaw = sr;
+          if (duty < ymDutyMin) ymDutyMin = duty;
+          if (duty > ymDutyMax) ymDutyMax = duty;
+        }
+        p1cnt = 0;
       }
       prev = in;
     }
-    portENABLE_INTERRUPTS();
   }
 }
 
@@ -463,7 +488,7 @@ static void ymAudioStart() {
                   (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2]);
   }
 
-  ledcAttach(PIN_PWM_OUT, PWM_FREQ, PWM_RES);
+  ledcAttachChannel(PIN_PWM_OUT, PWM_FREQ, PWM_RES, YM_PWM_CH);
   ledcWrite(PIN_PWM_OUT, 256);          // 無音(中点)
   ymCaptureRun = true;
 }
@@ -517,12 +542,14 @@ static void ymDiag() {
     prev = in;
   }
   if (oeWas) digitalWrite(PIN_OE_CHR, HIGH);
-  Serial.printf("DIAG clk=%d p1=%lu sh1=%lu so=%lu samples=%lu last=%04X duty=%d..%d\n",
+  Serial.printf("DIAG clk=%d p1=%lu sh1=%lu so=%lu samples=%lu/%lu p1cnt=%u..%u last=%04X duty=%d..%d\n",
                 ymClockOn ? 1 : 0,
                 (unsigned long)p1, (unsigned long)sh, (unsigned long)so,
-                (unsigned long)ymSampleCount, ymLastRaw,
+                (unsigned long)ymSampleCount, (unsigned long)ymFrameCount,
+                ymP1Min, ymP1Max, ymLastRaw,
                 ymDutyMin, ymDutyMax);
   ymDutyMin = 32767; ymDutyMax = -32768;   // 次回に向けてリセット
+  ymP1Min = 0xFFFF; ymP1Max = 0;
 
   // MD0-7(PPU データバス 8本)全部のエッジ数。SO/SH1/φ1 が想定外の
   // CHR ROM ピンに配線されていた場合、別のビットに活動が現れる。
@@ -719,6 +746,12 @@ void setup() {
   // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
   // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
   Serial.printf("RST reason=%d\n", (int)esp_reset_reason());
+  // 起動確認の短いSE(ピロリ♪)を G46 の PWM で鳴らす
+  ledcAttach(PIN_PWM_OUT, 2000, 10);
+  static const uint16_t bootSe[3] = {1319, 1760, 2093};  // E6 A6 C7
+  for (int i = 0; i < 3; i++) { ledcWriteTone(PIN_PWM_OUT, bootSe[i]); delay(70); }
+  ledcDetach(PIN_PWM_OUT);
+  pinMode(PIN_PWM_OUT, INPUT);
   ledReady();               // 電源ON = 緑
 }
 
