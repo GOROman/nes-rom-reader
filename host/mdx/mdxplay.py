@@ -76,6 +76,8 @@ def main():
                     help="実チップの φM 実測値 [Hz]。4MHz 相当へピッチ補正する"
                          "(既定=4MHz なので補正なし。3.58MHz駆動時は実測値を渡す)")
     ap.add_argument("--no-tune", action="store_true", help="ピッチ補正しない")
+    ap.add_argument("--loop", action="store_true",
+                    help="曲をループ再生する(Ctrl-Cで停止)")
     ap.add_argument("--monomix", action="store_true",
                     help="全chのRLを両ONに強制(モノラル出力構成で左パンの"
                          "パート欠落を防ぐ。ステレオ構成では不要)")
@@ -102,6 +104,17 @@ def main():
 
     s = serial.Serial(args.port, 115200, timeout=5)
     time.sleep(0.8)                 # ポートオープンでリセットが掛かる場合の猶予
+
+  # ループ対応: 1周分の送信処理を繰り返す
+    while True:
+        play_once(s, data, events)
+        if not args.loop:
+            break
+        time.sleep(2)
+    s.close()
+
+
+def play_once(s, data, events):
     s.reset_input_buffer()
     s.write(b"X\n")
     while True:
@@ -142,7 +155,6 @@ def main():
         print(line.decode(errors="replace").strip())
         if b"XDONE" in line or b"XTIMEOUT" in line:
             break
-    s.close()
 
 
 if __name__ == "__main__":
