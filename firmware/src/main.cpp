@@ -22,6 +22,8 @@
 //   Y <reg_hex> <val_hex>  -> YM2151 レジスタ書き込み。"YMOK rr vv\n"
 //   Q                      -> YM2151 デモ(ドレミファソラシドをループ再生)。
 //                             次のコマンド受信で停止し "YMDEMO DONE\n"
+//   A                      -> G46 に 880Hz テストトーンを1.5秒出力(配線前チェック用)。
+//                             "TONE DONE\n"
 //
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
@@ -39,6 +41,7 @@
 // (IEEE 802.3 / zlib.crc32 互換、8桁大文字hex)。ホスト側で照合する。
 
 #include <Arduino.h>
+#include <esp_task_wdt.h>
 
 // --- ピンアサイン (docs/hardware-design.md と一致させること) ---
 // 制御線は全て 74HCT541 バッファ経由で 5V 化してカートリッジへ。
@@ -303,9 +306,91 @@ static void ymClockStart() {
   ymClockOn = true;
 }
 
+// --- YM3012 シミュレーション ---
+//
+// YM2151 のシリアル音声出力を取り込み、デコードして PWM で再生する。
+//   SO  → カートエッジ26 (PPU D0) → U7で3.3V化 → MD0 = G4
+//   SH1 → カートエッジ27 (PPU D1) → U7        → MD1 = G5
+//   φ1  → カートエッジ28 (PPU D2) → U7        → MD2 = G6
+// 取り込み中は OE_CHR を Low にして U7 を有効化する。
+// 再生は G46(CIRAM A10 分圧の中点)へ LEDC PWM 78.125kHz/10bit を出力し、
+// 分圧中点から RC フィルタ+DCカット経由でアンプへ渡す。
+//
+// フォーマット(YM3012 互換): φ1 立ち上がりで SO を LSB ファーストにシフト、
+// SH1 立ち下がりで直前の13bit(仮数 B0-B9=オフセットバイナリ、指数 S0-S2)を
+// ラッチする。SH1 側 = RIGHT ch のモノラル。フレーム同期は SH1 エッジで
+// 取り直すため、ビット化けしても次のワードで自己復帰する。
+static const int PIN_YM_SO   = 4;   // MD0
+static const int PIN_YM_SH1  = 5;   // MD1
+static const int PIN_YM_PHI1 = 6;   // MD2
+static const int PIN_PWM_OUT = 46;  // CIRAM A10 分圧の中点
+// 78.125kHz / 9bit (80MHz / 512 / 2)。LEDC は分周比2未満を設定できないため
+// 10bit では setup が失敗する(div_param=0)。
+static const uint32_t PWM_FREQ = 78125;
+static const int PWM_RES = 9;       // duty 0-511、中点 256
+
+static volatile bool ymCaptureRun = false;
+
+// Core 0 の専用タスク。φ1(約1.79MHz)をポーリングでエッジ検出する。
+// 割り込みは許可したままなので tick 等で稀にビットを落とすが、
+// SH1 エッジ同期のため次ワードで復帰する(軽微なクラックルのみ)。
+static void ymCaptureLoop(void*) {
+  const uint32_t SO = 1UL << PIN_YM_SO;
+  const uint32_t SH = 1UL << PIN_YM_SH1;
+  const uint32_t P1 = 1UL << PIN_YM_PHI1;
+  for (;;) {
+    if (!ymCaptureRun) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+    uint32_t prev = REG_READ(GPIO_IN_REG);
+    uint16_t sr = 0;
+    while (ymCaptureRun) {
+      uint32_t in = REG_READ(GPIO_IN_REG);
+      uint32_t chg = in ^ prev;
+      if ((chg & P1) && (in & P1))            // φ1 立ち上がり: SO を取り込み
+        sr = (sr >> 1) | ((in & SO) ? 0x8000 : 0);
+      if ((chg & SH) && !(in & SH)) {         // SH1 立ち下がり: ワード確定
+        uint16_t m = (sr >> 3) & 0x3FF;       // 仮数 (B0 が LSB、B9=符号)
+        uint16_t e = (sr >> 13) & 0x07;       // 指数 (S0 が LSB)
+        int32_t v = (int32_t)m - 512;         // -512..+511
+        // 指数が大きいほど大振幅と仮定(逆だったらここを (e) に変える)
+        int32_t duty = 256 + (v >> (8 - (e ? e : 1)));  // 9bit: 0-511
+        ledcWrite(PIN_PWM_OUT, (uint32_t)duty);
+      }
+      prev = in;
+    }
+  }
+}
+
+static void ymAudioStart() {
+  digitalWrite(PIN_OE_CHR, LOW);        // U7 有効化 → SO/SH1/φ1 が G4-G6 に届く
+  ledcAttach(PIN_PWM_OUT, PWM_FREQ, PWM_RES);
+  ledcWrite(PIN_PWM_OUT, 256);          // 無音(中点)
+  ymCaptureRun = true;
+}
+
+static void ymAudioStop() {
+  ymCaptureRun = false;
+  delay(2);
+  ledcDetach(PIN_PWM_OUT);
+  pinMode(PIN_PWM_OUT, INPUT);          // ミラーリング判定入力に戻す
+  digitalWrite(PIN_OE_CHR, HIGH);
+}
+
+// G46 出力の配線前チェック用テストトーン(880Hz 矩形波を1.5秒)
+static void toneTest() {
+  bool wasRunning = ymCaptureRun;
+  if (wasRunning) ymAudioStop();
+  ledcAttach(PIN_PWM_OUT, 880, 10);
+  ledcWrite(PIN_PWM_OUT, 512);
+  delay(1500);
+  ledcDetach(PIN_PWM_OUT);
+  pinMode(PIN_PWM_OUT, INPUT);
+  if (wasRunning) ymAudioStart();
+}
+
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
 static void ymClockStop() {
   if (!ymClockOn) return;
+  ymAudioStop();
   ledcDetach(PIN_M2);
   ymClockOn = false;
   pinMode(PIN_M2, OUTPUT);
@@ -339,6 +424,7 @@ static void ymInit() {
   delay(2);                                // 最低 100µs 以上
   srWrite32(srCpuAddr(YM_WR_N | YM_IC_N)); // /IC 解除
   delay(2);
+  ymAudioStart();                          // YM3012 シミュレーション開始
 }
 
 // デモ: ch0 にシンプルな音色(CON=7, キャリア1個)を組んで
@@ -396,6 +482,13 @@ void setup() {
 #endif
   busIdle();
   srWrite32(SR_PPU_A13_N);  // アイドル時も PPU /A13=1 (PPU A13=0)
+  // YM3012 シミュレーション用キャプチャタスク(Core 0)。
+  // ymCaptureRun が立つまで待機する。優先度は USB スタックより低く、
+  // loopTask(Core 1)とは別コアなので通常動作へ影響しない。
+  // キャプチャ中は Core 0 の idle が回らないためタスクWDTを止める
+  // (disableCore0WDT は core 3.x でログを吐き続けるので deinit を使う)。
+  esp_task_wdt_deinit();
+  xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.begin(115200);
   ledReady();               // 電源ON = 緑
 }
@@ -537,6 +630,9 @@ void loop() {
     uint32_t addr = 0, len = 0;
     sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
     line = "";
+    // カートリッジ系コマンドは YM モード(M2=クロック出力)と両立しないので、
+    // 実行前に自動で YM モードを解除して通常のダンパー状態へ戻す。
+    if (cmd && ymClockOn && strchr("RCWMTSBP", cmd)) ymClockStop();
     switch (cmd) {
       case 'V': Serial.printf("famidump v0.6 rev%d\n", BOARD_REV); break;
       case 'R': handleRead('R', addr, len); break;
@@ -569,6 +665,10 @@ void loop() {
         ymDemo();
         ledReady();
         Serial.print("YMDEMO DONE\n");
+        break;
+      case 'A':
+        toneTest();
+        Serial.print("TONE DONE\n");
         break;
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
