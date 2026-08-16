@@ -785,10 +785,15 @@ void setup() {
   // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
   // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
   Serial.printf("RST reason=%d\n", (int)esp_reset_reason());
-  // 起動確認の短いSE(ピロリ♪)を G46 の PWM で鳴らす
-  ledcAttach(PIN_PWM_OUT, 2000, 10);
+  // 起動確認の短いSE(ピロリ♪)を G46 の PWM で鳴らす。
+  // デューティを3%に絞って音量を下げる(50%だとフルスイングで大きすぎる)
   static const uint16_t bootSe[3] = {1319, 1760, 2093};  // E6 A6 C7
-  for (int i = 0; i < 3; i++) { ledcWriteTone(PIN_PWM_OUT, bootSe[i]); delay(70); }
+  ledcAttach(PIN_PWM_OUT, bootSe[0], 10);
+  for (int i = 0; i < 3; i++) {
+    ledcChangeFrequency(PIN_PWM_OUT, bootSe[i], 10);
+    ledcWrite(PIN_PWM_OUT, 32);   // 32/1024 ≒ 3% duty ≒ -20dB
+    delay(70);
+  }
   ledcDetach(PIN_PWM_OUT);
   pinMode(PIN_PWM_OUT, INPUT);
   ledReady();               // 電源ON = 緑
