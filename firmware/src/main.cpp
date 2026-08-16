@@ -603,17 +603,27 @@ void loop() {
   // YM2151 を初期化してデモをループ再生する。シリアル入力(=最初のコマンド)で
   // 演奏を止め、φM も停止して通常のダンパー動作へ完全復帰する。
   static bool autoPlayChecked = false;
+  static bool bootToneOn = false;
   if (!autoPlayChecked) {
-    if (Serial.available()) {
-      autoPlayChecked = true;          // ホストが先に喋った → 通常モード
-    } else if (millis() > 2000) {
-      autoPlayChecked = true;
-      ymInit();
-      ledBusy();
-      ymDemo();                        // シリアル入力が来るまで演奏
-      ymClockStop();                   // M2 を GPIO に戻す
-      busIdle();
-      ledReady();
+    if (!bootToneOn) {                 // 起動直後 2秒間: G46 に確認用トーン
+      ledcAttach(PIN_PWM_OUT, 880, 10);
+      ledcWrite(PIN_PWM_OUT, 512);
+      bootToneOn = true;
+    }
+    if (Serial.available() || millis() > 2000) {
+      ledcDetach(PIN_PWM_OUT);         // トーン終了
+      pinMode(PIN_PWM_OUT, INPUT);
+      if (Serial.available()) {
+        autoPlayChecked = true;        // ホストが先に喋った → 通常モード
+      } else {
+        autoPlayChecked = true;
+        ymInit();
+        ledBusy();
+        ymDemo();                      // シリアル入力が来るまで演奏
+        ymClockStop();                 // M2 を GPIO に戻す
+        busIdle();
+        ledReady();
+      }
     } else {
       return;
     }
