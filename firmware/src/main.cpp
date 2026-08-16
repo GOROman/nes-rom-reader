@@ -330,6 +330,9 @@ static const uint32_t PWM_FREQ = 78125;
 static const int PWM_RES = 9;       // duty 0-511、中点 256
 
 static volatile bool ymCaptureRun = false;
+static volatile uint32_t ymSampleCount = 0;   // SH1 でラッチしたワード数
+static volatile uint16_t ymLastRaw = 0;       // 最後にラッチした生ワード
+static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
 
 // Core 0 の専用タスク。φ1(約1.79MHz)をポーリングでエッジ検出する。
 // 割り込みは許可したままなので tick 等で稀にビットを落とすが、
@@ -354,6 +357,10 @@ static void ymCaptureLoop(void*) {
         // 指数が大きいほど大振幅と仮定(逆だったらここを (e) に変える)
         int32_t duty = 256 + (v >> (8 - (e ? e : 1)));  // 9bit: 0-511
         ledcWrite(PIN_PWM_OUT, (uint32_t)duty);
+        ymSampleCount++;
+        ymLastRaw = sr;
+        if (duty < ymDutyMin) ymDutyMin = duty;
+        if (duty > ymDutyMax) ymDutyMax = duty;
       }
       prev = in;
     }
@@ -391,16 +398,53 @@ static void pwmDoremi() {
   pinMode(PIN_PWM_OUT, INPUT);
 }
 
-// G46 出力の配線前チェック用テストトーン(880Hz 矩形波を1.5秒)
+// G46 出力の配線前チェック用。まず GPIO の High/Low 駆動を読み戻して報告し
+// (外付け20kプルダウンがあるので、駆動できなければ H=0 になる)、
+// 続けて 880Hz テストトーンを1.5秒出す。
 static void toneTest() {
   bool wasRunning = ymCaptureRun;
   if (wasRunning) ymAudioStop();
+  gpio_set_direction((gpio_num_t)PIN_PWM_OUT, GPIO_MODE_INPUT_OUTPUT);
+  digitalWrite(PIN_PWM_OUT, HIGH);
+  delayMicroseconds(20);
+  bool hi = digitalRead(PIN_PWM_OUT);
+  digitalWrite(PIN_PWM_OUT, LOW);
+  delayMicroseconds(20);
+  bool lo = digitalRead(PIN_PWM_OUT);
+  Serial.printf("G46 DRIVE H=%d L=%d %s\n", hi, lo, (hi && !lo) ? "OK" : "NG");
   ledcAttach(PIN_PWM_OUT, 880, 10);
   ledcWrite(PIN_PWM_OUT, 512);
   delay(1500);
   ledcDetach(PIN_PWM_OUT);
   pinMode(PIN_PWM_OUT, INPUT);
   if (wasRunning) ymAudioStart();
+}
+
+// 信号診断: G4(SO)/G5(SH1)/G6(φ1) のエッジ数を100ms数える。
+// YM2151 が生きていれば無音でも φ1≒358k/100ms・SH1≒11k/100ms トグルする
+// (ポーリングなので実測値は取りこぼしで少なめに出る。0か非0かが重要)。
+static void ymDiag() {
+  int oeWas = digitalRead(PIN_OE_CHR);
+  digitalWrite(PIN_OE_CHR, LOW);           // U7 を通す
+  delayMicroseconds(10);
+  uint32_t p1 = 0, sh = 0, so = 0;
+  uint32_t prev = REG_READ(GPIO_IN_REG);
+  uint32_t t0 = millis();
+  while (millis() - t0 < 100) {
+    uint32_t in = REG_READ(GPIO_IN_REG);
+    uint32_t chg = in ^ prev;
+    if (chg & (1UL << PIN_YM_PHI1)) p1++;
+    if (chg & (1UL << PIN_YM_SH1))  sh++;
+    if (chg & (1UL << PIN_YM_SO))   so++;
+    prev = in;
+  }
+  if (oeWas) digitalWrite(PIN_OE_CHR, HIGH);
+  Serial.printf("DIAG clk=%d p1=%lu sh1=%lu so=%lu samples=%lu last=%04X duty=%d..%d\n",
+                ymClockOn ? 1 : 0,
+                (unsigned long)p1, (unsigned long)sh, (unsigned long)so,
+                (unsigned long)ymSampleCount, ymLastRaw,
+                ymDutyMin, ymDutyMax);
+  ymDutyMin = 32767; ymDutyMax = -32768;   // 次回に向けてリセット
 }
 
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
@@ -682,6 +726,9 @@ void loop() {
       case 'A':
         toneTest();
         Serial.print("TONE DONE\n");
+        break;
+      case 'D':
+        ymDiag();
         break;
       default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
     }
