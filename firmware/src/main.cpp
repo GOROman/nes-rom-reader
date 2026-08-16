@@ -520,8 +520,8 @@ static void toneTest() {
   if (wasRunning) ymAudioStop();
   ledcAttachChannel(PIN_PWM_R, 880, 10, YM_PWM_CH_R);
   ledcAttachChannel(PIN_PWM_L, 880, 10, YM_PWM_CH_L);
-  ledcWrite(PIN_PWM_R, 512);
-  ledcWrite(PIN_PWM_L, 512);
+  ledcWrite(PIN_PWM_R, 32);   // 3% duty: 電源負荷(ブラウンアウト)を避けた小音量
+  ledcWrite(PIN_PWM_L, 32);
   delay(1500);
   ledcDetach(PIN_PWM_R);
   ledcDetach(PIN_PWM_L);
@@ -643,6 +643,19 @@ static void ymDiag() {
   }
   Serial.printf("DIAG PWM-R(G2) edges/20ms=%lu (expect ~3100 in YM mode)\n",
                 (unsigned long)pwmEdges);
+
+  // 音声PWM(L=G41)の出力エッジ。G41は32以上なので GPIO_IN1 で読む
+  gpio_ll_input_enable(&GPIO, (gpio_num_t)PIN_PWM_L);
+  uint32_t pwmEdgesL = 0;
+  uint32_t prevL = REG_READ(GPIO_IN1_REG);
+  t0 = millis();
+  while (millis() - t0 < 20) {
+    uint32_t in1 = REG_READ(GPIO_IN1_REG);
+    if ((in1 ^ prevL) & (1UL << (PIN_PWM_L - 32))) pwmEdgesL++;
+    prevL = in1;
+  }
+  Serial.printf("DIAG PWM-L(G41) edges/20ms=%lu (expect ~3100 in YM mode)\n",
+                (unsigned long)pwmEdgesL);
 }
 
 static bool ymInit();       // 前方宣言
