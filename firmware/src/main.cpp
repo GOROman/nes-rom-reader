@@ -42,7 +42,7 @@
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
-#include "ys2_song.h"
+#include "embedded_song.h"
 #include <hal/gpio_ll.h>
 #include <driver/ledc.h>
 #include <hal/ledc_ll.h>
@@ -685,8 +685,8 @@ static void playEmbedded() {
   if (!ymClockOn && !ymInit()) { ledError(); return; }
   ledBusy();
   uint32_t next = micros();
-  const uint8_t *p = YS2_SONG;
-  const uint8_t *end = YS2_SONG + sizeof(YS2_SONG);
+  const uint8_t *p = EMBEDDED_SONG;
+  const uint8_t *end = EMBEDDED_SONG + sizeof(EMBEDDED_SONG);
   while (p + 4 <= end && !Serial.available()) {
     uint16_t dt = p[0] | ((uint16_t)p[1] << 8);
     if (dt == 0xFFFF && p[2] == 0xFF && p[3] == 0xFF) break;
