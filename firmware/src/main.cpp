@@ -370,11 +370,11 @@ static bool ymClockStart() {
 //   φ1  → CHR ROM pin11 (D0) → MD0=G4
 //   SO  → CHR ROM pin12 (D1) → MD1=G5
 //   SH1 → CHR ROM pin13 (D2) → MD2=G6
-//   SH2 → CHR ROM pin15 (D3) → MD3=G7  ※pin14はGNDなので注意
+//   SH2 → CHR ROM pin16 (D4) → MD4=G8  ※pin15(D3)はパッド不調のため移設
 static const int PIN_YM_PHI1 = 4;   // MD0
 static const int PIN_YM_SO   = 5;   // MD1
 static const int PIN_YM_SH1  = 6;   // MD2
-static const int PIN_YM_SH2  = 7;   // MD3 (SH2=LEFTch)
+static const int PIN_YM_SH2  = 8;   // MD4 (SH2=LEFTch)
 // PWM 音声出力はカートリッジへ向かう空き制御線2本を転用する(基板側の配線が不要):
 //   R = PPU /RD (G2)  → 541 → エッジ17 → CHR ROM pin 22 の基板側パッド
 //       ※要 CHR ROM pin 22(/OE)の足上げ。しないと PWM で ROM が
@@ -419,11 +419,11 @@ static void ymCaptureLoop(void*) {
   static dedic_gpio_bundle_handle_t bundle = NULL;
   if (bundle == NULL) {
     // バンドルは「配列順=ビット順」。1<<(pin-4) の変換が成り立つよう
-    // 必ず GPIO 番号昇順(G4,G5,G6,G7)で並べること
-    const int pins[4] = {PIN_YM_PHI1, PIN_YM_SO, PIN_YM_SH1, PIN_YM_SH2};
+    // 必ず GPIO 番号昇順・欠番なし(G4-G8)で並べること
+    const int pins[5] = {4, 5, 6, 7, 8};
     dedic_gpio_bundle_config_t cfg = {};
     cfg.gpio_array = (int*)pins;
-    cfg.array_size = 4;
+    cfg.array_size = 5;
     cfg.flags.in_en = 1;
     dedic_gpio_new_bundle(&cfg, &bundle);
   }
