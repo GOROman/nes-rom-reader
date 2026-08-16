@@ -118,6 +118,8 @@ def main():
             s.write(data[sent:sent + n])
             sent += n
             inflight += n
+        if sent >= len(data):
+            break          # 全量送信済み。K待ちするとXDONEの先頭を食うので抜ける
         b = s.read(1)
         if b == b"K":
             inflight -= 1024

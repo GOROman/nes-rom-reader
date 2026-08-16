@@ -17,7 +17,7 @@
 //                             バスコンフリクトを利用するため、addr には
 //                             「選びたいバンク番号と同じ値が入っているPRGアドレス」
 //                             を指定する(ホスト側でPRGダンプから検索)。
-//   F                      -> YM2151 初期化(φM 3.579545MHz 供給開始 + /IC リセット)。
+//   F                      -> YM2151 初期化(φM 4MHz 供給開始 + /IC リセット)。
 //                             "YMRDY\n" を返す。基板改造不要(全リビジョンで有効)。
 //   Y <reg_hex> <val_hex>  -> YM2151 レジスタ書き込み。"YMOK rr vv\n"
 //   Q                      -> YM2151 デモ(ドレミファソラシドをループ再生)。
@@ -31,7 +31,7 @@
 //
 // YM2151 は docs/ym2151.md の通り「アドレスバス経由」でカートリッジへ接続する:
 //   D0-7=CPU A0-A7  A0=CPU A8  /WR=CPU A9  /IC=CPU A10  /CS=GND  /RD=+5V
-//   φM=M2ピン(LEDC PWM 3.579545MHz に切替)
+//   φM=M2ピン(LEDC PWM 4MHz に切替)
 // データもストローブも 74HCT595 が常時駆動するアドレス線に乗せるため
 // U6/BUS_DIR の改造が不要で、カート側のハンダ付けは PRG ROM の足+
 // エッジフィンガー32(M2)の1点だけで済む。BUSY は固定ウェイトで代替。
@@ -305,14 +305,14 @@ static const uint32_t YM_CLOCK_HZ = 4000000;  // φM: X68000 と同じ 4MHz
 static const uint16_t YM_WR_N = 1 << 9;   // CPU A9  = /WR (負論理)
 static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
-// φM は Arduino の ledcAttach だと 3.58MHz 設定が静かに失敗することがあるため、
+// φM は Arduino の ledcAttach だと MHz 帯の設定が静かに失敗することがあるため、
 // ESP-IDF の API で APB 80MHz ソースを明示して設定する。
 // タイマー3/チャネル7 を専有(Arduino 側の自動割り当てと衝突させない)。
 static bool ymClockStart() {
   if (ymClockOn) return true;
   // LEDC は全タイマーでクロック源を共有し、Arduino の ledcAttach(音声PWM側)は
   // XTAL(40MHz) を選ぶため、φM 側も明示的に XTAL に合わせる。
-  // 2bit 分解能で分周比 40M/(3.579545M×4)=2.79 → 実周波数 ≒3.580MHz。
+  // 2bit 分解能で分周比 40M/(4M×4)=2.5 → 実周波数 4.000MHz。
   ledc_timer_config_t tcfg = {};
   tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
   tcfg.duty_resolution = LEDC_TIMER_2_BIT;
@@ -333,7 +333,10 @@ static bool ymClockStart() {
   ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
   uint32_t fr = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
   Serial.printf("YMCLK freq=%lu (target %lu)\n", (unsigned long)fr, (unsigned long)YM_CLOCK_HZ);
-  bool ok = (e1 == ESP_OK && e2 == ESP_OK && fr != 0);
+  // 実周波数が目標の±2%以内であることまで検査する(過去に78kHzなど
+  // 誤った非ゼロ周波数で成功扱いになった事故があるため)
+  bool ok = (e1 == ESP_OK && e2 == ESP_OK &&
+             fr > YM_CLOCK_HZ / 100 * 98 && fr < YM_CLOCK_HZ / 100 * 102);
   if (!ok)
     Serial.printf("ERR YM_CLOCK timer=%d ch=%d freq=%lu\n", (int)e1, (int)e2, (unsigned long)fr);
   ymClockOn = ok;   // 失敗時はYMモードに入らない(F は ERR を返す)
@@ -372,7 +375,7 @@ static volatile uint16_t ymLastRaw = 0;       // 最後にラッチした生ワ�
 static volatile uint16_t ymP1Min = 0xFFFF, ymP1Max = 0;  // フレームあたり φ1 エッジ数
 static volatile int16_t ymDutyMin = 32767, ymDutyMax = -32768;
 
-// Core 0 の専用タスク。φ1(約1.79MHz)をポーリングでエッジ検出する。
+// Core 0 の専用タスク。φ1(=φM/2、4MHz時2MHz)をポーリングでエッジ検出する。
 // 割り込みは許可したままなので tick 等で稀にビットを落とすが、
 // SH1 エッジ同期のため次ワードで復帰する(軽微なクラックルのみ)。
 // 実際の配線順に依存しないよう、F 実行時に MD0-2 の信号を測って
@@ -383,7 +386,7 @@ static volatile uint32_t ymMaskP1  = 1UL << PIN_YM_PHI1;
 
 static void ymCaptureLoop(void*) {
   // Dedicated GPIO: G4/G5/G6 を CPU 直結バンドル(bit0/1/2)にして1サイクルで読む。
-  // 通常の GPIO_IN レジスタ読み(APB経由 ~150ns)では φ1=1.79MHz の
+  // 通常の GPIO_IN レジスタ読み(APB経由 ~150ns)では φ1=2MHz の
   // 全エッジを捕捉しきれない。バンドルは使用するコア(Core 0)で作ること。
   static dedic_gpio_bundle_handle_t bundle = NULL;
   if (bundle == NULL) {
