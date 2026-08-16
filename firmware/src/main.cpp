@@ -411,7 +411,9 @@ static void ymCaptureLoop(void*) {
   // 全エッジを捕捉しきれない。バンドルは使用するコア(Core 0)で作ること。
   static dedic_gpio_bundle_handle_t bundle = NULL;
   if (bundle == NULL) {
-    const int pins[4] = {PIN_YM_SO, PIN_YM_SH1, PIN_YM_PHI1, PIN_YM_SH2};
+    // バンドルは「配列順=ビット順」。1<<(pin-4) の変換が成り立つよう
+    // 必ず GPIO 番号昇順(G4,G5,G6,G7)で並べること
+    const int pins[4] = {PIN_YM_PHI1, PIN_YM_SO, PIN_YM_SH1, PIN_YM_SH2};
     dedic_gpio_bundle_config_t cfg = {};
     cfg.gpio_array = (int*)pins;
     cfg.array_size = 4;
