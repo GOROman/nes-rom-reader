@@ -27,6 +27,8 @@
 //   K <kHz>                -> φM を変更(10進kHz、100-4500)。"CLK <hz>\n"。主にピッチが変わる
 //                             行頭の +/- キー1打でも ±50kHz(改行不要)。
 //                             +/- は E/Q の演奏を止めずに効く(X ストリーム中は不可)
+//   1-8 キー               -> FMチャンネル1-8のミュートをトグル(改行不要、演奏中も可)。
+//                             "CH<n> ON/OFF\n"。RLイネーブルの横取りで実現
 //
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
@@ -728,6 +730,7 @@ static void ymDiag() {
 
 static bool ymInit();       // 前方宣言
 static bool playbackInputCheck();
+static void ymToggleMute(int ch);
 static void ymWriteReg(uint8_t reg, uint8_t val);
 
 // 内蔵曲(ys2_song.h)を1回再生する。シリアル入力で中断。
@@ -785,8 +788,11 @@ static bool playbackInputCheck() {
     if (c == '+' || c == '-') {
       Serial.read();
       ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
+    } else if (c >= '1' && c <= '8') {
+      Serial.read();
+      ymToggleMute(c - '1');         // トラックのオン/オフ(即時)
     } else if (c == '\r' || c == '\n') {
-      Serial.read();                 // +/- 直後の改行は読み捨て
+      Serial.read();                 // 即時キー直後の改行は読み捨て
     } else {
       return true;
     }
@@ -816,10 +822,26 @@ static void ymWriteBus(bool a0, uint8_t v) {
   srWrite32(srCpuAddr(base | YM_WR_N));  // /WR 立ち上がりで取り込み
 }
 
+// トラック(FMチャンネル)ミュート: RLイネーブル($20-$27 bit7-6)を横取りして
+// ミュート中のchはRL=00で書く。エンベロープ等は走り続けるので復帰も自然。
+static volatile uint8_t ymMuteMask = 0;      // bit n = ch n ミュート
+static uint8_t ymRegRLShadow[8] = {0};       // 各chの $20+ch 最終書き込み値
+
 static void ymWriteReg(uint8_t reg, uint8_t val) {
+  if (reg >= 0x20 && reg <= 0x27) {
+    ymRegRLShadow[reg & 7] = val;            // 原値を保存してから
+    if (ymMuteMask & (1 << (reg & 7))) val &= 0x3F;  // ミュート中はRLを落とす
+  }
   ymWriteBus(false, reg);   // A0=0: アドレス (BUSYは立たないので待ち不要)
   ymWriteBus(true, val);    // A0=1: データ
   ymWaitBusy();             // データ書き込み後のみ BUSY 待ち
+}
+
+// ミュート切替(数字キー1-8)。即時にRLを書き換えて反映する
+static void ymToggleMute(int ch) {
+  ymMuteMask ^= (1 << ch);
+  Serial.printf("CH%d %s\n", ch + 1, (ymMuteMask & (1 << ch)) ? "OFF" : "ON");
+  if (ymClockOn) ymWriteReg(0x20 + ch, ymRegRLShadow[ch]);
 }
 
 // φM 供給開始 + /IC リセット。YM2151 はリセット中もクロックが必要。
@@ -1055,9 +1077,13 @@ void loop() {
   static String line;
   while (Serial.available()) {
     char c = Serial.read();
-    // リアルタイムつまみ: 行の先頭で +/- を押すと改行なしで即 φM を ±50kHz
+    // リアルタイムつまみ: 行の先頭で +/- は φM ±50kHz、1-8 はトラックon/off
     if (line.length() == 0 && (c == '+' || c == '-')) {
       ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
+      continue;
+    }
+    if (line.length() == 0 && c >= '1' && c <= '8') {
+      ymToggleMute(c - '1');
       continue;
     }
     if (c != '\n') {
