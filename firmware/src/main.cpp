@@ -27,8 +27,9 @@
 //   K <kHz>                -> φM を変更(10進kHz、100-4500)。"CLK <hz>\n"。主にピッチが変わる
 //                             行頭の +/- キー1打でも ±50kHz(改行不要)。
 //                             +/- は E/Q の演奏を止めずに効く(X ストリーム中は不可)
-//   1-8 キー               -> FMチャンネル1-8のミュートをトグル(改行不要、演奏中も可)。
-//                             "CH<n> ON/OFF\n"。RLイネーブルの横取りで実現
+//   即時キー(YMモード中、改行不要、演奏中も可):
+//     1-8=chミュート A=全ch解除 L/R=左右出力トグル +/-=ピッチ±50kHz
+//     P=内蔵曲を頭から S=完全停止 H=ヘルプ表示
 //
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
@@ -415,6 +416,10 @@ static volatile uint8_t ymRawArm = 0;   // G コマンドで64サンプル分だ
 static volatile bool ymMedianEn = true; // メディアンフィルタ有効(N コマンドで切替)
 static volatile uint32_t ymMedFixR = 0, ymMedFixL = 0;  // フィルタが値を差し替えた回数
 static volatile uint32_t ymBadExp = 0;  // e==0(YM3012仕様で禁止値)で破棄した数
+static volatile uint8_t ymMuteMask = 0;      // bit n = ch n ミュート
+static volatile bool ymOutMuteL = false, ymOutMuteR = false;  // L/R出力の個別ミュート
+static volatile bool ymRestartReq = false;   // P キー: 頭から再生
+static volatile bool ymStopReq = false;      // S キー: 完全停止(YMモード終了)
 static volatile int16_t ymDutyMinL = 32767, ymDutyMaxL = -32768;
 
 // Core 0 の専用タスク。φ1(=φM/2、4MHz時2MHz)をポーリングでエッジ検出する。
@@ -502,6 +507,7 @@ static void ymCaptureLoop(void*) {
             }
             mR2 = mR1; mR1 = duty;   // 履歴は無効時も更新(再有効化時の汚染防止)
             duty = out;
+            if (ymOutMuteR) duty = 256;   // R出力ミュート(中点固定)
             ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
             ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
             ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
@@ -531,6 +537,7 @@ static void ymCaptureLoop(void*) {
             }
             mL2 = mL1; mL1 = duty;
             duty = out;
+            if (ymOutMuteL) duty = 256;   // L出力ミュート(中点固定)
             ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
             ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
             ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
@@ -731,6 +738,8 @@ static void ymDiag() {
 static bool ymInit();       // 前方宣言
 static bool playbackInputCheck();
 static void ymToggleMute(int ch);
+static bool ymDoKey(int c);
+static void ymClockStop();
 static void ymWriteReg(uint8_t reg, uint8_t val);
 
 // 内蔵曲(ys2_song.h)を1回再生する。シリアル入力で中断。
@@ -785,19 +794,28 @@ static void ymClockSet(uint32_t hz) {
 static bool playbackInputCheck() {
   while (Serial.available()) {
     int c = Serial.peek();
-    if (c == '+' || c == '-') {
-      Serial.read();
-      ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
-    } else if (c >= '1' && c <= '8') {
-      Serial.read();
-      ymToggleMute(c - '1');         // トラックのオン/オフ(即時)
-    } else if (c == '\r' || c == '\n') {
-      Serial.read();                 // 即時キー直後の改行は読み捨て
-    } else {
-      return true;
-    }
+    if (c == '\r' || c == '\n') { Serial.read(); continue; }  // 即時キー後の改行
+    if (c == 'S') { Serial.read(); ymStopReq = true; return true; }     // 完全停止
+    if (c == 'P') { Serial.read(); ymRestartReq = true; return true; }  // 頭から
+    if (ymDoKey(c)) { Serial.read(); continue; }
+    return true;   // それ以外は通常コマンド → 再生停止して行パーサへ渡す
   }
   return false;
+}
+
+// 内蔵曲の再生制御ラッパ: P で頭から再生し直し、S で完全停止する
+static void playEmbeddedControlled() {
+  do {
+    ymRestartReq = false;
+    Serial.print("PLAY\n");
+    playEmbedded();
+  } while (ymRestartReq);
+  if (ymStopReq) {
+    ymStopReq = false;
+    ymClockStop();
+    busIdle();
+    Serial.print("STOP\n");
+  }
 }
 
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
@@ -824,7 +842,6 @@ static void ymWriteBus(bool a0, uint8_t v) {
 
 // トラック(FMチャンネル)ミュート: RLイネーブル($20-$27 bit7-6)を横取りして
 // ミュート中のchはRL=00で書く。エンベロープ等は走り続けるので復帰も自然。
-static volatile uint8_t ymMuteMask = 0;      // bit n = ch n ミュート
 static uint8_t ymRegRLShadow[8] = {0};       // 各chの $20+ch 最終書き込み値
 
 static void ymWriteReg(uint8_t reg, uint8_t val) {
@@ -842,6 +859,47 @@ static void ymToggleMute(int ch) {
   ymMuteMask ^= (1 << ch);
   Serial.printf("CH%d %s\n", ch + 1, (ymMuteMask & (1 << ch)) ? "OFF" : "ON");
   if (ymClockOn) ymWriteReg(0x20 + ch, ymRegRLShadow[ch]);
+}
+
+static void ymPrintHelp() {
+  Serial.print(
+    "-- YM keys (YMモード中・改行不要) --\n"
+    " 1-8 : FMチャンネル ミュートトグル\n"
+    " A   : 全チャンネル ミュート解除\n"
+    " L/R : 左/右出力 トグル\n"
+    " +/- : phiM +-50kHz (ピッチ)\n"
+    " P   : 内蔵曲を頭から再生\n"
+    " S   : 停止 (YMモード終了)\n"
+    " H   : このヘルプ\n");
+}
+
+// YMモード中の即時キー(+,-,1-8,H,L,R,A)。処理したら true。
+// S/P は再生ループ制御に関わるため呼び出し側で扱う。
+static bool ymDoKey(int c) {
+  if (c == '+' || c == '-') {
+    ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
+    return true;
+  }
+  if (c >= '1' && c <= '8') { ymToggleMute(c - '1'); return true; }
+  if (c == 'H') { ymPrintHelp(); return true; }
+  if (c == 'A') {
+    ymMuteMask = 0;
+    if (ymClockOn)
+      for (int ch = 0; ch < 8; ch++) ymWriteReg(0x20 + ch, ymRegRLShadow[ch]);
+    Serial.print("ALL CH ON\n");
+    return true;
+  }
+  if (c == 'L') {
+    ymOutMuteL = !ymOutMuteL;
+    Serial.printf("OUT-L %s\n", ymOutMuteL ? "OFF" : "ON");
+    return true;
+  }
+  if (c == 'R') {
+    ymOutMuteR = !ymOutMuteR;
+    Serial.printf("OUT-R %s\n", ymOutMuteR ? "OFF" : "ON");
+    return true;
+  }
+  return false;
 }
 
 // φM 供給開始 + /IC リセット。YM2151 はリセット中もクロックが必要。
@@ -1064,7 +1122,8 @@ void loop() {
     } else if (millis() > 2000) {
       autoPlayChecked = true;
       while (!playbackInputCheck()) {
-        playEmbedded();
+        playEmbeddedControlled();
+        if (!ymClockOn) break;   // S で完全停止された
         for (int i = 0; i < 30 && !playbackInputCheck(); i++) delay(100);
       }
       ymClockStop();
@@ -1077,13 +1136,19 @@ void loop() {
   static String line;
   while (Serial.available()) {
     char c = Serial.read();
-    // リアルタイムつまみ: 行の先頭で +/- は φM ±50kHz、1-8 はトラックon/off
-    if (line.length() == 0 && (c == '+' || c == '-')) {
-      ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
-      continue;
+    // YMモード中の即時キー(改行不要): +,-,1-8,H,L,R,A,P,S。
+    // 非YMモード時は従来の行コマンド(A=トーン, S=ステータス, R=PRG読み等)を邪魔しない
+    if (line.length() == 0 && ymClockOn) {
+      if (c == 'P') { playEmbeddedControlled(); continue; }
+      if (c == 'S') {
+        for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);  // 全chキーオフ
+        ymClockStop(); busIdle(); Serial.print("STOP\n");
+        continue;
+      }
+      if (ymDoKey(c)) continue;
     }
-    if (line.length() == 0 && c >= '1' && c <= '8') {
-      ymToggleMute(c - '1');
+    if (line.length() == 0 && (c == '+' || c == '-')) {   // +/- はYM外でも保存だけ効く
+      ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
       continue;
     }
     if (c != '\n') {
@@ -1181,7 +1246,7 @@ void loop() {
       // 途中で止めるには何かコマンドを送る。
       case 'E':
         Serial.print("ESTART\n");
-        playEmbedded();
+        playEmbeddedControlled();
         Serial.print("EDONE\n");
         break;
       // MDX 等のレジスタイベントストリーム再生。
