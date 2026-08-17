@@ -22,8 +22,10 @@
 //   Y <reg_hex> <val_hex>  -> YM2151 レジスタ書き込み。"YMOK rr vv\n"
 //   Q                      -> YM2151 デモ(ドレミファソラシドをループ再生)。
 //                             次のコマンド受信で停止し "YMDEMO DONE\n"
-//   A                      -> G46 に 880Hz テストトーンを1.5秒出力(配線前チェック用)。
+//   A                      -> R=880Hz/L=440Hz テストトーンを3秒出力(配線チェック用)。
 //                             "TONE DONE\n"
+//   K <kHz>                -> φM をリアルタイム変更(10進kHz、100-4500)。"CLK <hz>\n"
+//                             行頭の +/- キー1打でも ±50kHz(改行不要)
 //
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
@@ -310,7 +312,9 @@ static void busIdle() {
 // 入力で幅の上限はなく min 100ns を満たせばよい。
 // 起動直後〜F実行前はシフトレジスタが全0 = /IC=Low なので YM はリセット状態
 // に保たれる(好都合)。
-static const uint32_t YM_CLOCK_HZ = 4000000;  // φM: X68000 と同じ 4MHz
+static const uint32_t YM_CLOCK_HZ = 4000000;  // φM 既定値: X68000 と同じ 4MHz
+static volatile uint32_t ymClockHz = YM_CLOCK_HZ;  // 現在の φM (K コマンド/±キーで可変)
+static volatile uint32_t ymBusyUs  = 22;           // BUSY待ち = 68/φM + 5µs (クロック追従)
 static const uint16_t YM_WR_N = 1 << 9;   // CPU A9  = /WR (負論理)
 static const uint16_t YM_IC_N = 1 << 10;  // CPU A10 = /IC (負論理)
 
@@ -326,7 +330,7 @@ static bool ymClockStart() {
   tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
   tcfg.duty_resolution = LEDC_TIMER_2_BIT;
   tcfg.timer_num = LEDC_TIMER_3;
-  tcfg.freq_hz = YM_CLOCK_HZ;
+  tcfg.freq_hz = ymClockHz;
   tcfg.clk_cfg = LEDC_USE_XTAL_CLK;
   esp_err_t e1 = ledc_timer_config(&tcfg);
   ledc_channel_config_t ccfg = {};
@@ -341,11 +345,11 @@ static bool ymClockStart() {
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7);
   ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
   uint32_t fr = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3);
-  Serial.printf("YMCLK freq=%lu (target %lu)\n", (unsigned long)fr, (unsigned long)YM_CLOCK_HZ);
+  Serial.printf("YMCLK freq=%lu (target %lu)\n", (unsigned long)fr, (unsigned long)ymClockHz);
   // 実周波数が目標の±2%以内であることまで検査する(過去に78kHzなど
   // 誤った非ゼロ周波数で成功扱いになった事故があるため)
   bool ok = (e1 == ESP_OK && e2 == ESP_OK &&
-             fr > YM_CLOCK_HZ / 100 * 98 && fr < YM_CLOCK_HZ / 100 * 102);
+             fr > ymClockHz / 100 * 98 && fr < ymClockHz / 100 * 102);
   if (!ok)
     Serial.printf("ERR YM_CLOCK timer=%d ch=%d freq=%lu\n", (int)e1, (int)e2, (unsigned long)fr);
   ymClockOn = ok;   // 失敗時はYMモードに入らない(F は ERR を返す)
@@ -741,6 +745,22 @@ static void playEmbedded() {
   ledReady();
 }
 
+// φM をリアルタイム変更する(演奏中のピッチ/テンポつまみ)。
+// 100kHz〜4.5MHz にクランプ。キャプチャはSHエッジ同期なので自動追従する。
+static void ymClockSet(uint32_t hz) {
+  if (hz < 100000) hz = 100000;
+  if (hz > 4500000) hz = 4500000;
+  ymClockHz = hz;
+  ymBusyUs = 68000000UL / hz + 5;
+  if (ymClockOn) {
+    ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3, hz);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7, 2);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7);
+  }
+  Serial.printf("CLK %lu\n",
+                (unsigned long)ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3));
+}
+
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
 static void ymClockStop() {
   if (!ymClockOn) return;
@@ -752,7 +772,7 @@ static void ymClockStop() {
 }
 
 // BUSY は読めないので最悪値で待つ。BUSY 期間は φM 68サイクル ≒ 19µs。
-static void ymWaitBusy() { delayMicroseconds(20); }  // BUSY=68φM≒17µs@4MHz
+static void ymWaitBusy() { delayMicroseconds(ymBusyUs); }  // BUSY=68φMサイクル+マージン
 
 // データと A0 をアドレス線に確定させ、A9 で /WR パルスを作る。
 // セットアップ/ホールドは srWrite32 の所要時間(数µs)で自然に満たされる。
@@ -998,6 +1018,11 @@ void loop() {
   static String line;
   while (Serial.available()) {
     char c = Serial.read();
+    // リアルタイムつまみ: 行の先頭で +/- を押すと改行なしで即 φM を ±50kHz
+    if (line.length() == 0 && (c == '+' || c == '-')) {
+      ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
+      continue;
+    }
     if (c != '\n') {
       if (c != '\r') line += c;
       continue;
@@ -1005,6 +1030,7 @@ void loop() {
     char cmd = line.length() ? line[0] : 0;
     uint32_t addr = 0, len = 0;
     sscanf(line.c_str() + 1, "%lx %lx", (unsigned long*)&addr, (unsigned long*)&len);
+    long decArg = atol(line.c_str() + 1);   // K コマンド用(10進)
     line = "";
     // カートリッジ系コマンドは YM モード(M2=クロック出力)と両立しないので、
     // 実行前に自動で YM モードを解除して通常のダンパー状態へ戻す。
@@ -1065,6 +1091,12 @@ void loop() {
         Serial.print("GDONE\n");
         break;
       }
+      // φM クロックのリアルタイム変更。K <kHz>(10進、例: K 3579)。
+      // K 単独で現在値表示。行頭の +/- キーでも ±50kHz(改行不要)
+      case 'K':
+        if (decArg > 0) ymClockSet((uint32_t)decArg * 1000);
+        else Serial.printf("CLK %lu\n", (unsigned long)ymClockHz);
+        break;
       // メディアンフィルタの有効/無効(効果の A/B 比較用)
       case 'N':
         ymMedianEn = (addr != 0);
