@@ -29,7 +29,7 @@
 //                             +/- は E/Q の演奏を止めずに効く(X ストリーム中は不可)
 //   即時キー(YMモード中、改行不要、演奏中も可):
 //     1-8=chミュート A=全ch解除 L/R=左右出力トグル +/-=ピッチ±50kHz
-//     P=内蔵曲を頭から S=完全停止 H=ヘルプ表示
+//     P=内蔵曲を頭から S=曲停止(モード維持) Q=Quit(YMモード完全終了) H=ヘルプ
 //
 // WiFi: W コマンド(引数なし)でオンデマンド起動/停止。SoftAP "YM2151"
 // (pass: ym2151jukebox) → http://192.168.4.1 に Web UI(再生/停止・
@@ -426,7 +426,8 @@ static volatile uint32_t ymBadExp = 0;  // e==0(YM3012仕様で禁止値)で破�
 static volatile uint8_t ymMuteMask = 0;      // bit n = ch n ミュート
 static volatile bool ymOutMuteL = false, ymOutMuteR = false;  // L/R出力の個別ミュート
 static volatile bool ymRestartReq = false;   // P キー: 頭から再生
-static volatile bool ymStopReq = false;      // S キー: 完全停止(YMモード終了)
+static volatile bool ymStopReq = false;      // S キー: 曲停止(YMモードは維持)
+static volatile bool ymQuitReq = false;      // Q キー: YMモード完全終了
 
 // --- Web UI からの操作は「仮想キー」として注入し、シリアルの即時キーと
 //     同じ経路(再生ループ/メインループ)で消費する。バス書き込みの競合なし ---
@@ -900,13 +901,15 @@ static bool playbackInputCheck() {
   int v;
   while ((v = popVKey()) >= 0) {          // Web UI からの仮想キー
     if (v == 'S') { ymStopReq = true; return true; }
+    if (v == 'Q') { ymQuitReq = true; return true; }
     if (v == 'P') { ymRestartReq = true; return true; }
     ymDoKey(v);
   }
   while (Serial.available()) {
     int c = Serial.peek();
     if (c == '\r' || c == '\n') { Serial.read(); continue; }  // 即時キー後の改行
-    if (c == 'S') { Serial.read(); ymStopReq = true; return true; }     // 完全停止
+    if (c == 'S') { Serial.read(); ymStopReq = true; return true; }     // 曲停止
+    if (c == 'Q') { Serial.read(); ymQuitReq = true; return true; }     // モード終了
     if (c == 'P') { Serial.read(); ymRestartReq = true; return true; }  // 頭から
     if (ymDoKey(c)) { Serial.read(); continue; }
     return true;   // それ以外は通常コマンド → 再生停止して行パーサへ渡す
@@ -921,10 +924,13 @@ static void playEmbeddedControlled() {
     Serial.print("PLAY\n");
     playEmbedded();
   } while (ymRestartReq);
-  if (ymStopReq) {
-    ymStopReq = false;
+  if (ymQuitReq) {                 // Q: YMモード完全終了(自動では戻らない)
+    ymQuitReq = false;
     ymClockStop();
     busIdle();
+    Serial.print("QUIT\n");
+  } else if (ymStopReq) {          // S: 曲停止のみ(YMモード維持、Pで再開可)
+    ymStopReq = false;
     Serial.print("STOP\n");
   }
 }
@@ -980,7 +986,8 @@ static void ymPrintHelp() {
     " L/R : 左/右出力 トグル\n"
     " +/- : phiM +-50kHz (ピッチ)\n"
     " P   : 内蔵曲を頭から再生\n"
-    " S   : 停止 (YMモード終了)\n"
+    " S   : 曲停止 (YMモード維持、Pで再開)\n"
+    " Q   : Quit = YMモード完全終了\n"
     " H   : このヘルプ\n");
 }
 
@@ -1254,7 +1261,12 @@ void loop() {
       else if (v == 'S') {
         if (ymClockOn) {
           for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);
-          ymClockStop(); busIdle(); Serial.print("STOP\n");
+          Serial.print("STOP\n");
+        }
+      } else if (v == 'Q') {
+        if (ymClockOn) {
+          for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);
+          ymClockStop(); busIdle(); Serial.print("QUIT\n");
         }
       } else ymDoKey(v);
     }
@@ -1269,7 +1281,12 @@ void loop() {
       if (c == 'P') { playEmbeddedControlled(); continue; }
       if (c == 'S') {
         for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);  // 全chキーオフ
-        ymClockStop(); busIdle(); Serial.print("STOP\n");
+        Serial.print("STOP\n");                              // YMモードは維持
+        continue;
+      }
+      if (c == 'Q') {
+        for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);
+        ymClockStop(); busIdle(); Serial.print("QUIT\n");    // 完全終了
         continue;
       }
       if (ymDoKey(c)) continue;
