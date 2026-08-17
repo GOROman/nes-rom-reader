@@ -31,6 +31,10 @@
 //     1-8=chミュート A=全ch解除 L/R=左右出力トグル +/-=ピッチ±50kHz
 //     P=内蔵曲を頭から S=完全停止 H=ヘルプ表示
 //
+// WiFi: SoftAP "YM2151" (pass: ym2151jukebox) で http://192.168.4.1 に
+// Web UI(再生/停止・chミュート・L/R・ピッチ)。操作は仮想キーとして注入
+// されるため、ストリーミング再生中でも効く。
+//
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
 // 通常のダンパー動作へ復帰する(その入力は普通のコマンドとして処理される)。
@@ -47,6 +51,8 @@
 // (IEEE 802.3 / zlib.crc32 互換、8桁大文字hex)。ホスト側で照合する。
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
 #include <esp_task_wdt.h>
 #include "embedded_song.h"
 #include <hal/gpio_ll.h>
@@ -420,6 +426,21 @@ static volatile uint8_t ymMuteMask = 0;      // bit n = ch n ミュート
 static volatile bool ymOutMuteL = false, ymOutMuteR = false;  // L/R出力の個別ミュート
 static volatile bool ymRestartReq = false;   // P キー: 頭から再生
 static volatile bool ymStopReq = false;      // S キー: 完全停止(YMモード終了)
+
+// --- Web UI からの操作は「仮想キー」として注入し、シリアルの即時キーと
+//     同じ経路(再生ループ/メインループ)で消費する。バス書き込みの競合なし ---
+static volatile uint8_t vkeyQ[16];
+static volatile uint8_t vkeyHead = 0, vkeyTail = 0;
+static void pushVKey(uint8_t c) {
+  uint8_t next = (vkeyHead + 1) & 15;
+  if (next != vkeyTail) { vkeyQ[vkeyHead] = c; vkeyHead = next; }
+}
+static int popVKey() {
+  if (vkeyHead == vkeyTail) return -1;
+  uint8_t c = vkeyQ[vkeyTail];
+  vkeyTail = (vkeyTail + 1) & 15;
+  return c;
+}
 static volatile int16_t ymDutyMinL = 32767, ymDutyMaxL = -32768;
 
 // Core 0 の専用タスク。φ1(=φM/2、4MHz時2MHz)をポーリングでエッジ検出する。
@@ -763,6 +784,67 @@ static void playEmbedded() {
   ledReady();
 }
 
+// --- WiFi SoftAP + Web UI ---
+// SSID "YM2151" / pass "ym2151jukebox" / http://192.168.4.1
+// 操作は仮想キー注入なので X ストリーム再生中でも効く。
+static WebServer webServer(80);
+
+static const char WEB_PAGE[] PROGMEM = R"HTML(<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YM2151 Jukebox</title><style>
+body{font-family:sans-serif;background:#111;color:#eee;text-align:center;margin:8px}
+h1{font-size:1.2em;color:#8cf}
+button{font-size:1.1em;margin:4px;padding:10px 14px;border-radius:8px;border:0;background:#345;color:#fff}
+button.on{background:#2a7}button.off{background:#833}
+.big{font-size:1.4em;padding:14px 22px}
+#st{color:#9f9;font-size:.9em;margin-top:8px;white-space:pre}
+</style></head><body>
+<h1>YM2151 JUKEBOX</h1>
+<div><button class="big" onclick="k('P')">&#9654; PLAY</button>
+<button class="big" onclick="k('S')">&#9632; STOP</button></div>
+<div id="ch"></div>
+<div><button onclick="k('A')">ALL ON</button>
+<button id="L" onclick="k('L')">L</button>
+<button id="R" onclick="k('R')">R</button></div>
+<div><button onclick="k('-')">PITCH -</button><span id="clk">-</span>
+<button onclick="k('+')">PITCH +</button></div>
+<div id="st"></div>
+<script>
+for(let i=1;i<=8;i++){let b=document.createElement('button');b.id='c'+i;b.textContent='CH'+i;
+b.onclick=()=>k(String(i));document.getElementById('ch').appendChild(b);}
+function k(c){fetch('/k?c='+encodeURIComponent(c)).then(upd)}
+function upd(){fetch('/status').then(r=>r.json()).then(j=>{
+document.getElementById('clk').textContent=(j.clk/1e6).toFixed(2)+'MHz';
+for(let i=1;i<=8;i++)document.getElementById('c'+i).className=(j.mute>>(i-1))&1?'off':'on';
+document.getElementById('L').className=j.outL?'on':'off';
+document.getElementById('R').className=j.outR?'on':'off';
+document.getElementById('st').textContent=(j.on?'YM ON':'YM OFF')+'  samples='+j.smp;
+})}
+setInterval(upd,2000);upd();
+</script></body></html>)HTML";
+
+static void webTask(void*) {
+  webServer.on("/", []() {
+    webServer.send_P(200, "text/html", WEB_PAGE);
+  });
+  webServer.on("/k", []() {
+    String c = webServer.arg("c");
+    if (c.length() == 1) pushVKey((uint8_t)c[0]);
+    webServer.send(200, "text/plain", "ok");
+  });
+  webServer.on("/status", []() {
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "{\"clk\":%lu,\"mute\":%u,\"outL\":%d,\"outR\":%d,\"on\":%d,\"smp\":%lu}",
+             (unsigned long)ymClockHz, ymMuteMask,
+             ymOutMuteL ? 1 : 0, ymOutMuteR ? 1 : 0,
+             ymClockOn ? 1 : 0, (unsigned long)ymSampleCount);
+    webServer.send(200, "application/json", buf);
+  });
+  webServer.begin();
+  for (;;) { webServer.handleClient(); vTaskDelay(pdMS_TO_TICKS(3)); }
+}
+
 // φM をリアルタイム変更する。変わるのは主にピッチ(イベント時刻は micros()
 // 基準なので曲の進行速度は不変)。100kHz〜4.5MHz にクランプ。
 // キャプチャはSHエッジ同期なので自動追従する。
@@ -792,6 +874,12 @@ static void ymClockSet(uint32_t hz) {
 // これにより E/Q の再生を止めずにピッチを動かせる。X ストリーム中は
 // バイナリレコードと区別できないため対象外(ホスト側から操作する)。
 static bool playbackInputCheck() {
+  int v;
+  while ((v = popVKey()) >= 0) {          // Web UI からの仮想キー
+    if (v == 'S') { ymStopReq = true; return true; }
+    if (v == 'P') { ymRestartReq = true; return true; }
+    ymDoKey(v);
+  }
   while (Serial.available()) {
     int c = Serial.peek();
     if (c == '\r' || c == '\n') { Serial.read(); continue; }  // 即時キー後の改行
@@ -983,6 +1071,9 @@ void setup() {
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
+  // WiFi SoftAP + Web UI (http://192.168.4.1)。操作は仮想キー注入方式
+  WiFi.softAP("YM2151", "ym2151jukebox");
+  xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, nullptr, 1);
   // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
   // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
   Serial.printf("RST reason=%d\n", (int)esp_reset_reason());
@@ -1130,6 +1221,20 @@ void loop() {
       busIdle();
     } else {
       return;
+    }
+  }
+
+  // Web UI からの仮想キー(アイドル時)。P は再生開始として扱う
+  {
+    int v;
+    while ((v = popVKey()) >= 0) {
+      if (v == 'P') { playEmbeddedControlled(); }
+      else if (v == 'S') {
+        if (ymClockOn) {
+          for (int ch = 0; ch < 8; ch++) ymWriteReg(0x08, ch);
+          ymClockStop(); busIdle(); Serial.print("STOP\n");
+        }
+      } else ymDoKey(v);
     }
   }
 
