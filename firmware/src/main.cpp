@@ -24,8 +24,9 @@
 //                             次のコマンド受信で停止し "YMDEMO DONE\n"
 //   A                      -> R=880Hz/L=440Hz テストトーンを3秒出力(配線チェック用)。
 //                             "TONE DONE\n"
-//   K <kHz>                -> φM をリアルタイム変更(10進kHz、100-4500)。"CLK <hz>\n"
-//                             行頭の +/- キー1打でも ±50kHz(改行不要)
+//   K <kHz>                -> φM を変更(10進kHz、100-4500)。"CLK <hz>\n"。主にピッチが変わる
+//                             行頭の +/- キー1打でも ±50kHz(改行不要)。
+//                             +/- は E/Q の演奏を止めずに効く(X ストリーム中は不可)
 //
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
@@ -479,7 +480,9 @@ static void ymCaptureLoop(void*) {
         ymFrameCount++;
         if (cnt < ymP1Min) ymP1Min = cnt;
         if (cnt > ymP1Max) ymP1Max = cnt;
-        // ハーフフレーム先頭の3ビットは捨てビットなので 13 まで許容。
+        // 検証窓の根拠: エッジ欠落のほぼ全ては直前ラッチ処理中(=スロット
+        // 先頭の捨てビット3個の区間)に起きるため 13 まで許容しても語は無傷。
+        // まれな割り込み起因のデータ部欠落は e==0 検査と median-3 で吸収する。
         // 17/33 は余分な1ビットがワードの後に入った状態なので抽出位置を+1補正
         if ((cnt >= 13 && cnt <= 17) || (cnt >= 29 && cnt <= 33)) {
           int kr = ymROff + ((cnt == 17 || cnt == 33) ? 1 : 0);
@@ -489,13 +492,14 @@ static void ymCaptureLoop(void*) {
             ymBadExp++;
           } else {
             int32_t duty = decodeDuty(m, e, nsErrR);
+            int32_t out = duty;
             if (ymMedianEn) {
-              int32_t out = med3(mR2, mR1, duty);
-              mR2 = mR1; mR1 = duty;
+              out = med3(mR2, mR1, duty);
               int32_t d = out - duty;
               if (d > 24 || d < -24) ymMedFixR++;  // スパイク級の差し替えのみ計数
-              duty = out;
             }
+            mR2 = mR1; mR1 = duty;   // 履歴は無効時も更新(再有効化時の汚染防止)
+            duty = out;
             ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, duty);
             ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R, true);
             ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_R);
@@ -517,13 +521,14 @@ static void ymCaptureLoop(void*) {
             ymBadExp++;
           } else {
             int32_t duty = decodeDuty(m, e, nsErrL);
+            int32_t out = duty;
             if (ymMedianEn) {
-              int32_t out = med3(mL2, mL1, duty);
-              mL2 = mL1; mL1 = duty;
+              out = med3(mL2, mL1, duty);
               int32_t d = out - duty;
-              if (d > 24 || d < -24) ymMedFixL++;  // スパイク級の差し替えのみ計数
-              duty = out;
+              if (d > 24 || d < -24) ymMedFixL++;
             }
+            mL2 = mL1; mL1 = duty;
+            duty = out;
             ledc_ll_set_duty_int_part(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, duty);
             ledc_ll_set_duty_start(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L, true);
             ledc_ll_ls_channel_update(&LEDC, LEDC_LOW_SPEED_MODE, YM_PWM_CH_L);
@@ -722,6 +727,7 @@ static void ymDiag() {
 }
 
 static bool ymInit();       // 前方宣言
+static bool playbackInputCheck();
 static void ymWriteReg(uint8_t reg, uint8_t val);
 
 // 内蔵曲(ys2_song.h)を1回再生する。シリアル入力で中断。
@@ -731,7 +737,7 @@ static void playEmbedded() {
   uint32_t next = micros();
   const uint8_t *p = EMBEDDED_SONG;
   const uint8_t *end = EMBEDDED_SONG + sizeof(EMBEDDED_SONG);
-  while (p + 4 <= end && !Serial.available()) {
+  while (p + 4 <= end && !playbackInputCheck()) {
     uint16_t dt = p[0] | ((uint16_t)p[1] << 8);
     if (dt == 0xFFFF && p[2] == 0xFF && p[3] == 0xFF) break;
     next += (uint32_t)dt * 100;
@@ -745,20 +751,47 @@ static void playEmbedded() {
   ledReady();
 }
 
-// φM をリアルタイム変更する(演奏中のピッチ/テンポつまみ)。
-// 100kHz〜4.5MHz にクランプ。キャプチャはSHエッジ同期なので自動追従する。
+// φM をリアルタイム変更する。変わるのは主にピッチ(イベント時刻は micros()
+// 基準なので曲の進行速度は不変)。100kHz〜4.5MHz にクランプ。
+// キャプチャはSHエッジ同期なので自動追従する。
 static void ymClockSet(uint32_t hz) {
   if (hz < 100000) hz = 100000;
   if (hz > 4500000) hz = 4500000;
-  ymClockHz = hz;
-  ymBusyUs = 68000000UL / hz + 5;
   if (ymClockOn) {
-    ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3, hz);
+    if (ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3, hz) != ESP_OK) {
+      Serial.print("ERR CLK\n");   // 失敗時は内部状態を更新しない
+      return;
+    }
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7, 2);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_7);
+    ymClockHz = hz;
+    ymBusyUs = 68000000UL / hz + 5;
+    Serial.printf("CLK %lu\n",
+                  (unsigned long)ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3));
+  } else {
+    ymClockHz = hz;                  // 停止中は次回 ymClockStart で反映
+    ymBusyUs = 68000000UL / hz + 5;
+    Serial.printf("CLK %lu (stored)\n", (unsigned long)hz);
   }
-  Serial.printf("CLK %lu\n",
-                (unsigned long)ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_3));
+}
+
+// 再生ループ内の入力処理: +/-(と直後の改行)はその場でクロック操作として
+// 消費し、それ以外の入力が来たら true を返す(=再生停止要求)。
+// これにより E/Q の再生を止めずにピッチを動かせる。X ストリーム中は
+// バイナリレコードと区別できないため対象外(ホスト側から操作する)。
+static bool playbackInputCheck() {
+  while (Serial.available()) {
+    int c = Serial.peek();
+    if (c == '+' || c == '-') {
+      Serial.read();
+      ymClockSet(ymClockHz + (c == '+' ? 50000 : -50000));
+    } else if (c == '\r' || c == '\n') {
+      Serial.read();                 // +/- 直後の改行は読み捨て
+    } else {
+      return true;
+    }
+  }
+  return false;
 }
 
 // φM を止めて M2 を通常の GPIO(High) に戻す。カートリッジコマンドと共存するため。
@@ -821,8 +854,8 @@ static void ymDemo() {
   // G=8,G#=9,A=A,A#=C,B=D,C=E。3/7/B/F は欠番)
   static const uint8_t kc[8] = {0x3E, 0x41, 0x44, 0x45,   // ド レ ミ ファ (C4 D4 E4 F4)
                                 0x48, 0x4A, 0x4D, 0x4E};  // ソ ラ シ ド   (G4 A4 B4 C5)
-  while (!Serial.available()) {   // 次のコマンドが来るまでループ
-    for (int i = 0; i < 8 && !Serial.available(); i++) {
+  while (!playbackInputCheck()) {   // 次のコマンドが来るまでループ(+/-は素通し)
+    for (int i = 0; i < 8 && !playbackInputCheck(); i++) {
       ymWriteReg(0x28, kc[i]);  // KC
       ymWriteReg(0x08, 0x78);   // ch0 全スロット KeyOn
       delay(220);
@@ -860,9 +893,12 @@ void setup() {
   // YM3012 シミュレーション用キャプチャタスク(Core 0)。
   // ymCaptureRun が立つまで待機する。優先度は USB スタックより低く、
   // loopTask(Core 1)とは別コアなので通常動作へ影響しない。
-  // キャプチャ中は Core 0 の idle が回らないためタスクWDTを止める
-  // (disableCore0WDT は core 3.x でログを吐き続けるので deinit を使う)。
-  esp_task_wdt_deinit();
+  // キャプチャ中は Core 0 の idle が回らないため、idle0 だけ WDT の監視から
+  // 外す(全体 deinit だと他タスクの見張りまで失われるため)。
+  {
+    TaskHandle_t idle0 = xTaskGetIdleTaskHandleForCPU(0);
+    if (idle0) esp_task_wdt_delete(idle0);
+  }
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
@@ -1004,9 +1040,9 @@ void loop() {
       autoPlayChecked = true;
     } else if (millis() > 2000) {
       autoPlayChecked = true;
-      while (!Serial.available()) {
+      while (!playbackInputCheck()) {
         playEmbedded();
-        for (int i = 0; i < 30 && !Serial.available(); i++) delay(100);
+        for (int i = 0; i < 30 && !playbackInputCheck(); i++) delay(100);
       }
       ymClockStop();
       busIdle();
@@ -1159,7 +1195,9 @@ void loop() {
         ledReady();
         break;
       }
-      default:  Serial.print("ERR\n"); ledError(); break;  // 不正コマンド=赤点滅
+      default:
+        if (cmd) { Serial.print("ERR\n"); ledError(); }  // 不正コマンド=赤点滅(空行は無視)
+        break;
     }
   }
 }
