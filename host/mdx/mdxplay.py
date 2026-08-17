@@ -89,7 +89,9 @@ def main():
         for line in f:
             if line.startswith("#"):
                 if line.startswith("#clock"):
-                    src_clock = float(line.split()[1])   # vgm2evt が記録した元クロック
+                    v = float(line.split()[1])           # vgm2evt が記録した元クロック
+                    if v > 0:
+                        src_clock = v
                 continue
             t, a, d = line.split()
             events.append((int(t), int(a), int(d)))
@@ -126,6 +128,7 @@ def main():
         # X モード中断: 終端レコードを送って全chキーオフさせる
         try:
             s.write(struct.pack("<HBB", 0xFFFF, 0xFF, 0xFF))
+            s.write(b"\n")   # 端末側の行パーサに残る半端バイトを掃除
             s.timeout = 3
             s.readline()
         except Exception:
