@@ -943,6 +943,7 @@ static void ymClockStop() {
   ymClockOn = false;
   pinMode(PIN_M2, OUTPUT);
   digitalWrite(PIN_M2, HIGH);
+  Serial.print("[DUMPER MODE]\n");
 }
 
 // BUSY は読めないので最悪値で待つ。BUSY 期間は φM 68サイクル ≒ 19µs。
@@ -1030,6 +1031,7 @@ static bool ymInit() {
   srWrite32(srCpuAddr(YM_WR_N | YM_IC_N)); // /IC 解除
   delay(2);
   ymAudioStart();                          // YM3012 シミュレーション開始
+  Serial.print("[FM MODE] (H でキー一覧)\n");
   return true;
 }
 
