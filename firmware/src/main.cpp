@@ -1113,8 +1113,8 @@ void setup() {
   ledcAttachChannel(PIN_PWM_L, bootSe[0], 10, YM_PWM_CH_L);
   for (int i = 0; i < 3; i++) {
     ledcChangeFrequency(PIN_PWM_R, bootSe[i], 10);  // ch0/1は同一タイマーなので両chに効く
-    ledcWrite(PIN_PWM_R, 32);   // 32/1024 ≒ 3% duty ≒ -20dB
-    ledcWrite(PIN_PWM_L, 32);
+    ledcWrite(PIN_PWM_R, 12);   // 12/1024 ≒ 1.2% duty(控えめな起動音)
+    ledcWrite(PIN_PWM_L, 12);
     delay(70);
   }
   ledcDetach(PIN_PWM_R);
