@@ -1071,8 +1071,11 @@ void setup() {
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
-  // WiFi SoftAP + Web UI (http://192.168.4.1)。操作は仮想キー注入方式
+  // WiFi SoftAP + Web UI (http://192.168.4.1)。操作は仮想キー注入方式。
+  // 送信出力を最小限に絞る(WiFi TXの電流スパイクで5Vがサグして
+  // リセットループに入る事故があったため。到達距離は数m=同室内で十分)
   WiFi.softAP("YM2151", "ym2151jukebox");
+  WiFi.setTxPower(WIFI_POWER_7dBm);
   xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, nullptr, 1);
   // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
   // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
