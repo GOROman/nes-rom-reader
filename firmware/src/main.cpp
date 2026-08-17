@@ -893,16 +893,13 @@ void setup() {
   // YM3012 シミュレーション用キャプチャタスク(Core 0)。
   // ymCaptureRun が立つまで待機する。優先度は USB スタックより低く、
   // loopTask(Core 1)とは別コアなので通常動作へ影響しない。
-  // キャプチャ中は Core 0 の idle が回らないため、idle0 だけ WDT の監視から
-  // 外す(全体 deinit だと他タスクの見張りまで失われるため)。
-  // ただし core 3.x の idle フックは購読解除後も esp_task_wdt_reset() を
-  // 呼び続けて "task not found" ログを洪水させるため、task_wdt タグの
-  // ログのみ抑制する(WDT のリセット/パニック動作自体は他タスクに有効なまま)。
-  {
-    TaskHandle_t idle0 = xTaskGetIdleTaskHandleForCPU(0);
-    if (idle0) esp_task_wdt_delete(idle0);
-    esp_log_level_set("task_wdt", ESP_LOG_NONE);
-  }
+  // キャプチャ中は Core 0 の idle が回らないためタスク WDT を無効化する。
+  // 【既知のトレードオフ】idle0 だけ購読解除する方法は、core 3.x の idle
+  // フックが解除後も esp_task_wdt_reset() を呼び続けて "task not found" を
+  // 洪水させ、esp_log_level_set でも止められなかったため断念。全体 deinit は
+  // 他タスクの見張りも失うが、本機はハング時に物理リセットで復旧できる
+  // 用途のため実害よりログ汚染の方が問題と判断した。
+  esp_task_wdt_deinit();
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
