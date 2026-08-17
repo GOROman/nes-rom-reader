@@ -31,9 +31,10 @@
 //     1-8=chミュート A=全ch解除 L/R=左右出力トグル +/-=ピッチ±50kHz
 //     P=内蔵曲を頭から S=完全停止 H=ヘルプ表示
 //
-// WiFi: SoftAP "YM2151" (pass: ym2151jukebox) で http://192.168.4.1 に
-// Web UI(再生/停止・chミュート・L/R・ピッチ)。操作は仮想キーとして注入
-// されるため、ストリーミング再生中でも効く。
+// WiFi: W コマンド(引数なし)でオンデマンド起動/停止。SoftAP "YM2151"
+// (pass: ym2151jukebox) → http://192.168.4.1 に Web UI(再生/停止・
+// chミュート・L/R・ピッチ)。操作は仮想キー注入なのでストリーム再生中も効く。
+// ※常時ONにしないのは、送信スパイク電流でカート接続時にブートループするため
 //
 // スタンドアロン自動演奏: 電源ONから2秒以内にシリアル入力がなければ
 // 自動で F+Q 相当を実行し演奏を続ける。シリアル入力で演奏と φM を止めて
@@ -845,6 +846,28 @@ static void webTask(void*) {
   for (;;) { webServer.handleClient(); vTaskDelay(pdMS_TO_TICKS(3)); }
 }
 
+// WiFi はオンデマンド起動(W コマンド)。常時ONだと送信スパイクの電流で
+// カート接続時に5Vがサグしブートループに陥るため、必要時のみ点ける。
+static bool wifiOn = false;
+static bool webTaskStarted = false;
+static void toggleWifi() {
+  if (!wifiOn) {
+    WiFi.softAP("YM2151", "ym2151jukebox");
+    WiFi.setTxPower(WIFI_POWER_7dBm);   // 電流スパイク低減(同室内なら十分)
+    if (!webTaskStarted) {
+      xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, nullptr, 1);
+      webTaskStarted = true;
+    }
+    wifiOn = true;
+    Serial.print("WIFI ON  SSID=YM2151 pass=ym2151jukebox http://192.168.4.1\n");
+  } else {
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    wifiOn = false;
+    Serial.print("WIFI OFF\n");
+  }
+}
+
 // φM をリアルタイム変更する。変わるのは主にピッチ(イベント時刻は micros()
 // 基準なので曲の進行速度は不変)。100kHz〜4.5MHz にクランプ。
 // キャプチャはSHエッジ同期なので自動追従する。
@@ -1071,12 +1094,8 @@ void setup() {
   xTaskCreatePinnedToCore(ymCaptureLoop, "ymcap", 4096, nullptr, 3, nullptr, 0);
   Serial.setRxBufferSize(8192);  // X コマンドのストリーム受信用に拡大
   Serial.begin(115200);
-  // WiFi SoftAP + Web UI (http://192.168.4.1)。操作は仮想キー注入方式。
-  // 送信出力を最小限に絞る(WiFi TXの電流スパイクで5Vがサグして
-  // リセットループに入る事故があったため。到達距離は数m=同室内で十分)
-  WiFi.softAP("YM2151", "ym2151jukebox");
-  WiFi.setTxPower(WIFI_POWER_7dBm);
-  xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, nullptr, 1);
+  // WiFi は自動起動しない(W コマンドでオンデマンド起動)。
+  // 常時ONだとカート接続時に電流スパイクでブートループする事故があった
   // 予期しないリセットの診断用(1=PowerOn 3=SW 4=Panic 5=IntWdt 6=TaskWdt
   // 7=WdtOther 8=DeepSleep 9=Brownout 10=SDIO)
   Serial.printf("RST reason=%d\n", (int)esp_reset_reason());
@@ -1275,7 +1294,10 @@ void loop() {
       case 'V': Serial.printf("famidump v0.6 rev%d rst=%d\n", BOARD_REV, (int)esp_reset_reason()); break;
       case 'R': handleRead('R', addr, len); break;
       case 'C': handleRead('C', addr, len); break;
-      case 'W': handleRead('W', addr, len); break;
+      case 'W':
+        if (addr == 0 && len == 0) toggleWifi();       // 引数なし: WiFiトグル
+        else handleRead('W', addr, len);               // 引数あり: WRAM読み(従来)
+        break;
       case 'M': Serial.printf("%c\n", detectMirroring()); break;
       case 'T': handleSelfTest(); break;
       case 'S': handleStatus(); break;
